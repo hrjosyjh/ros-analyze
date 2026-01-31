@@ -28,11 +28,13 @@ ROS2 AGV launch.log 시간대별 분석기
 
 import argparse
 import csv
+import glob
 import io
 import json
 import os
 import re
 import signal
+import shlex
 import sys
 import time
 from collections import defaultdict, deque
@@ -1332,7 +1334,9 @@ def main():
   python3 analyze_log.py launch.log -f -n motor_driver  # 특정 노드 실시간
         """
     )
-    parser.add_argument('logfile', help='분석할 로그 파일 경로')
+    parser.add_argument('logfile', nargs='?', help='분석할 로그 파일 경로')
+    parser.add_argument('--interactive', '-I', action='store_true',
+                        help='인터랙티브 마법사로 옵션 선택 (TTY에서 logfile 미지정시 자동)')
     parser.add_argument('--interval', '-i', default='1h',
                         help='분석 시간 단위 (예: 1h, 30m, 10m, 1m, 30s) [기본: 1h]')
     parser.add_argument('--top-nodes', '-t', type=int, default=10,
@@ -1367,6 +1371,567 @@ def main():
                         help='실시간 모드 시작 시 읽어올 마지막 줄 수 [기본: 5000, 0=파일 끝부터]')
 
     args = parser.parse_args()
+
+    def _is_tty() -> bool:
+        try:
+            return sys.stdin.isatty() and sys.stdout.isatty()
+        except Exception:
+            return False
+
+    def _prompt_line(prompt: str, default=None) -> str:
+        if default is None or default == '':
+            suffix = ''
+        else:
+            suffix = f" [{default}]"
+        s = input(f"{prompt}{suffix}: ").strip()
+        if s == '':
+            return '' if default is None else str(default)
+        return s
+
+    def _prompt_bool(prompt: str, default: bool = False) -> bool:
+        guide = 'Y/n' if default else 'y/N'
+        while True:
+            s = input(f"{prompt} ({guide}): ").strip().lower()
+            if s == '':
+                return default
+            if s in ('y', 'yes', '1', 'true', 't'):
+                return True
+            if s in ('n', 'no', '0', 'false', 'f'):
+                return False
+            print("  y/n 로 입력하세요")
+
+    def _prompt_int(prompt: str, default=None, min_value=None):
+        while True:
+            s = _prompt_line(prompt, default=default)
+            if s == '' and default is None:
+                return None
+            try:
+                v = int(s)
+            except ValueError:
+                print("  숫자를 입력하세요")
+                continue
+            if min_value is not None and v < min_value:
+                print(f"  {min_value} 이상으로 입력하세요")
+                continue
+            return v
+
+    def _prompt_float(prompt: str, default=None, min_value=None):
+        while True:
+            s = _prompt_line(prompt, default=default)
+            if s == '' and default is None:
+                return None
+            try:
+                v = float(s)
+            except ValueError:
+                print("  숫자를 입력하세요")
+                continue
+            if min_value is not None and v < min_value:
+                print(f"  {min_value} 이상으로 입력하세요")
+                continue
+            return v
+
+    def _prompt_interval(prompt: str, default: str) -> str:
+        while True:
+            s = _prompt_line(prompt, default=default).strip()
+            if s == '':
+                return default
+            try:
+                parse_interval(s)
+                return s
+            except ValueError as e:
+                print(f"  {e}")
+
+    def _prompt_datetime_optional(prompt: str, default=None):
+        while True:
+            s = _prompt_line(prompt, default=default).strip()
+            if s == '':
+                return None
+            try:
+                parse_datetime_arg(s)
+                return s
+            except ValueError as e:
+                print(f"  {e}")
+
+    def _prompt_existing_file(prompt: str, default=None) -> str:
+        while True:
+            s = _prompt_line(prompt, default=default).strip()
+            if s == '':
+                if default:
+                    s = str(default)
+                else:
+                    print("  파일 경로를 입력하세요")
+                    continue
+            p = os.path.expanduser(s)
+            if os.path.isfile(p):
+                return p
+            print(f"  파일을 찾을 수 없습니다: {p}")
+
+    def _logfile_candidates(default=None):
+        """Shallow logfile discovery: cwd + ./log only."""
+        out = []
+
+        def _add(p):
+            if not p:
+                return
+            p = os.path.expanduser(str(p))
+            if os.path.isfile(p) and p not in out:
+                out.append(p)
+
+        _add(default)
+        _add('launch.log')
+        for p in sorted(glob.glob('*.log')):
+            _add(p)
+        for p in sorted(glob.glob(os.path.join('log', '*.log'))):
+            _add(p)
+        return out
+
+    def _logfile_meta_brief(p: str) -> str:
+        try:
+            st = os.stat(p)
+            size_mb = st.st_size / (1024 * 1024)
+            mtime = datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')
+            return f"{size_mb:6.1f}MB {mtime}"
+        except OSError:
+            return ""
+
+    def _pick_logfile_curses(candidates):
+        """Return selected path; None => manual input/fallback."""
+        if not _is_tty():
+            return None
+        if os.environ.get('TERM', '').lower() in ('', 'dumb'):
+            return None
+
+        try:
+            import curses  # stdlib; may be missing on some platforms
+        except Exception:
+            return None
+
+        def _safe_addnstr(stdscr, y, x, s, n):
+            try:
+                stdscr.addnstr(y, x, s, n)
+            except Exception:
+                return
+
+        def _browse_files(stdscr, start_dir: str):
+            # Returns selected file path or None (manual input)
+            cur_dir = os.path.abspath(start_dir or '.')
+            idx = 0
+            top = 0
+            msg = ""
+
+            def _list_dir(d: str):
+                nonlocal msg
+                try:
+                    names = os.listdir(d)
+                except OSError as e:
+                    msg = f"디렉터리를 열 수 없습니다: {e}"
+                    return [], [], []
+
+                dirs = []
+                log_files = []
+                other_files = []
+                for name in names:
+                    if name in ('.', '..'):
+                        continue
+                    full = os.path.join(d, name)
+                    try:
+                        if os.path.isdir(full):
+                            dirs.append(name)
+                        elif name.lower().endswith('.log'):
+                            log_files.append(name)
+                        else:
+                            other_files.append(name)
+                    except OSError:
+                        # If we cannot stat, treat as other file-like entry.
+                        other_files.append(name)
+
+                key = lambda s: s.lower()
+                dirs.sort(key=key)
+                log_files.sort(key=key)
+                other_files.sort(key=key)
+                msg = ""
+                return dirs, log_files, other_files
+
+            while True:
+                dirs, log_files, other_files = _list_dir(cur_dir)
+
+                entries = []
+                entries.append(('dir', '..'))
+                for name in dirs:
+                    entries.append(('dir', name))
+                for name in log_files:
+                    entries.append(('file', name))
+                for name in other_files:
+                    entries.append(('file', name))
+                entries.append(('manual', None))
+
+                try:
+                    h, w = stdscr.getmaxyx()
+                    stdscr.erase()
+
+                    if h < 6 or w < 24:
+                        _safe_addnstr(stdscr, 0, 0, "logfile 탐색", max(0, w - 1))
+                        _safe_addnstr(stdscr, 2, 0, "터미널이 너무 작습니다", max(0, w - 1))
+                        _safe_addnstr(stdscr, 3, 0, "q=직접입력", max(0, w - 1))
+                        stdscr.refresh()
+                    else:
+                        header0 = "logfile 탐색 (↑/↓, Enter=열기/선택, Backspace=상위, g=./log, q=직접입력)"
+                        _safe_addnstr(stdscr, 0, 0, header0, max(0, w - 1))
+                        _safe_addnstr(stdscr, 1, 0, f"{cur_dir}", max(0, w - 1))
+                        if msg:
+                            _safe_addnstr(stdscr, 2, 0, msg, max(0, w - 1))
+                            list_top_y = 3
+                        else:
+                            list_top_y = 2
+
+                        visible_h = max(1, h - list_top_y)
+                        if idx >= len(entries):
+                            idx = max(0, len(entries) - 1)
+                            top = 0
+                        if idx < top:
+                            top = idx
+                        if idx >= top + visible_h:
+                            top = idx - visible_h + 1
+
+                        for row in range(visible_h):
+                            i = top + row
+                            if i >= len(entries):
+                                break
+                            y = list_top_y + row
+                            kind, name = entries[i]
+                            prefix = "> " if i == idx else "  "
+                            if kind == 'dir':
+                                label = f"[D] {name}"
+                            elif kind == 'manual':
+                                label = "직접 입력..."
+                            else:
+                                label = f"    {name}"
+
+                            _safe_addnstr(stdscr, y, 0, prefix + label, max(0, w - 1))
+
+                        stdscr.refresh()
+
+                except Exception:
+                    return None
+
+                try:
+                    ch = stdscr.getch()
+                except Exception:
+                    return None
+
+                if ch in (ord('q'), ord('Q'), 27):
+                    return None
+                if ch in (curses.KEY_UP, ord('k')):
+                    idx = (idx - 1) % len(entries)
+                    continue
+                if ch in (curses.KEY_DOWN, ord('j')):
+                    idx = (idx + 1) % len(entries)
+                    continue
+                if ch in (curses.KEY_RESIZE,):
+                    continue
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    parent = os.path.dirname(cur_dir)
+                    if parent and parent != cur_dir:
+                        cur_dir = parent
+                        idx = 0
+                        top = 0
+                    continue
+                if ch in (ord('g'), ord('G')):
+                    if os.path.isdir('log'):
+                        cur_dir = os.path.abspath('log')
+                        idx = 0
+                        top = 0
+                        msg = ""
+                    else:
+                        msg = "./log 디렉터리가 없습니다"
+                    continue
+                if ch in (curses.KEY_ENTER, 10, 13):
+                    kind, name = entries[idx]
+                    if kind == 'manual':
+                        return None
+                    if kind == 'dir':
+                        if name == '..':
+                            parent = os.path.dirname(cur_dir)
+                            if parent and parent != cur_dir:
+                                cur_dir = parent
+                        else:
+                            next_dir = os.path.join(cur_dir, name)
+                            if os.path.isdir(next_dir):
+                                cur_dir = next_dir
+                            else:
+                                msg = f"디렉터리를 찾을 수 없습니다: {next_dir}"
+                        idx = 0
+                        top = 0
+                        continue
+                    # file
+                    p = os.path.join(cur_dir, name)
+                    if os.path.isfile(p):
+                        return p
+                    msg = f"파일을 찾을 수 없습니다: {p}"
+
+        def _run(stdscr):
+            # Main menu: quick candidates + browse + manual input
+            items = []
+            for p in (candidates or []):
+                items.append(('file', str(p)))
+
+            items.append(('browse', '.'))
+            if os.path.isdir('log'):
+                items.append(('browse_log', 'log'))
+            items.append(('manual', None))
+
+            idx = 0
+            top = 0
+            try:
+                stdscr.keypad(True)
+            except Exception:
+                pass
+            try:
+                curses.curs_set(0)
+            except Exception:
+                pass
+
+            while True:
+                try:
+                    h, w = stdscr.getmaxyx()
+                    stdscr.erase()
+
+                    title = "logfile 선택 (↑/↓, Enter, q=직접입력)"
+                    _safe_addnstr(stdscr, 0, 0, title, max(0, w - 1))
+
+                    if h < 6 or w < 24:
+                        _safe_addnstr(stdscr, 2, 0, "터미널이 너무 작습니다", max(0, w - 1))
+                        _safe_addnstr(stdscr, 3, 0, "q=직접입력", max(0, w - 1))
+                        stdscr.refresh()
+                    else:
+                        visible_h = h - 2
+                        if idx < top:
+                            top = idx
+                        if idx >= top + visible_h:
+                            top = idx - visible_h + 1
+
+                        for row in range(visible_h):
+                            i = top + row
+                            if i >= len(items):
+                                break
+                            y = 1 + row
+
+                            kind, val = items[i]
+                            if kind == 'file':
+                                left = str(val)
+                                right = _logfile_meta_brief(str(val))
+                            elif kind == 'browse':
+                                left = "탐색... (현재 디렉터리)"
+                                right = ""
+                            elif kind == 'browse_log':
+                                left = "탐색... (./log)"
+                                right = ""
+                            else:
+                                left = "직접 입력..."
+                                right = ""
+
+                            prefix = "> " if i == idx else "  "
+                            if right:
+                                min_gap = 2
+                                right_w = min(len(right), max(0, w - 1 - min_gap))
+                                left_w = max(0, w - 1 - len(prefix) - min_gap - right_w)
+                                _safe_addnstr(stdscr, y, 0, prefix + left, len(prefix) + left_w)
+                                if right_w > 0:
+                                    _safe_addnstr(stdscr, y, w - right_w - 1, right[-right_w:], right_w)
+                            else:
+                                max_left = max(0, w - 1 - len(prefix))
+                                _safe_addnstr(stdscr, y, 0, prefix + left, max_left)
+
+                        stdscr.refresh()
+
+                except Exception:
+                    return None
+
+                try:
+                    ch = stdscr.getch()
+                except Exception:
+                    return None
+
+                if ch in (ord('q'), ord('Q'), 27):
+                    return None
+                if ch in (curses.KEY_UP, ord('k')):
+                    idx = (idx - 1) % len(items)
+                    continue
+                if ch in (curses.KEY_DOWN, ord('j')):
+                    idx = (idx + 1) % len(items)
+                    continue
+                if ch in (curses.KEY_RESIZE,):
+                    continue
+                if ch in (curses.KEY_ENTER, 10, 13):
+                    kind, val = items[idx]
+                    if kind == 'manual':
+                        return None
+                    if kind == 'browse':
+                        return _browse_files(stdscr, '.')
+                    if kind == 'browse_log':
+                        return _browse_files(stdscr, 'log')
+                    return str(val)
+
+        try:
+            return curses.wrapper(_run)
+        except Exception:
+            return None
+
+    def _pick_logfile_numeric(candidates):
+        if not candidates:
+            return None
+
+        print("\nlogfile 선택:")
+        for i, p in enumerate(candidates, 1):
+            meta = _logfile_meta_brief(p)
+            if meta:
+                print(f"  {i:2d}) {p}  ({meta})")
+            else:
+                print(f"  {i:2d}) {p}")
+        print("   0) 직접 입력")
+
+        while True:
+            try:
+                v = _prompt_int('선택', default=1, min_value=0)
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if v is None:
+                return None
+            if v == 0:
+                return None
+            if 1 <= v <= len(candidates):
+                return candidates[v - 1]
+            print(f"  0~{len(candidates)} 범위로 입력하세요")
+
+    def _pick_logfile_for_wizard(default=None):
+        candidates = _logfile_candidates(default=default)
+        # In a normal TTY with curses available, always show the arrow-key UI
+        # even if there are no shallow candidates.
+        p = _pick_logfile_curses(candidates)
+        if p:
+            return p
+        # curses unavailable/failed or user chose manual -> numeric menu fallback
+        if candidates:
+            return _pick_logfile_numeric(candidates)
+        return None
+
+    def _run_interactive_wizard(existing_args):
+        print("\n[interactive] 옵션을 선택하세요 (Enter=기본값)")
+        print(
+            """[examples] 입력 예시
+  follow(-f)      : y / n
+  full(--full)    : y / n
+  interval(-i)    : 1h, 10m, 30s, 2(=2h)   (h/m/s 지원, 숫자만=시간)
+  top-nodes(-t)   : 10, 20
+  errors-only(-e) : y / n
+  node(-n)        : motor_driver   (부분 매칭, 빈칸=없음)
+  focus-node      : tsd            (부분 매칭, 빈칸=없음)
+  csv(-c)         : reports/my_report.csv  (빈칸=자동)
+  --from / --to   : 2026-01-27 | 2026-01-27 09:00 | 09:00  (오늘)
+"""
+        )
+        w = argparse.Namespace(**vars(existing_args))
+
+        picked = _pick_logfile_for_wizard(default=w.logfile)
+        if picked:
+            w.logfile = picked
+        else:
+            w.logfile = _prompt_existing_file('logfile', default=w.logfile)
+        w.follow = _prompt_bool('follow 모드(-f) 사용', default=bool(w.follow))
+
+        w.full = _prompt_bool('전체 재분석(--full)', default=bool(w.full))
+        w.interval = _prompt_interval('interval(-i) (예: 1h, 10m, 30s)', default=str(w.interval))
+        w.top_nodes = _prompt_int('top-nodes(-t)', default=w.top_nodes, min_value=1)
+        w.errors_only = _prompt_bool('errors-only(-e)', default=bool(w.errors_only))
+
+        node_default = w.node if w.node is not None else ''
+        s = _prompt_line('node(-n) (부분 매칭, 빈칸=없음)', default=node_default).strip()
+        w.node = s or None
+
+        focus_default = w.focus_node if w.focus_node is not None else ''
+        s = _prompt_line('focus-node (부분 매칭, 빈칸=없음)', default=focus_default).strip()
+        w.focus_node = s or None
+
+        csv_default = w.csv if w.csv is not None else ''
+        s = _prompt_line('csv(-c) (파일 경로, 빈칸=자동)', default=csv_default).strip()
+        w.csv = s or None
+
+        tf_default = w.time_from if w.time_from is not None else ''
+        w.time_from = _prompt_datetime_optional('--from (빈칸=없음)', default=tf_default)
+        tt_default = w.time_to if w.time_to is not None else ''
+        w.time_to = _prompt_datetime_optional('--to (빈칸=없음)', default=tt_default)
+
+        if w.follow:
+            w.window = _prompt_interval('window(-w) (예: 5m, 10m)', default=str(w.window))
+            w.refresh = _prompt_float('refresh(-r) (초)', default=w.refresh, min_value=0.1)
+            w.tail = _prompt_int('tail (0=끝부터)', default=w.tail, min_value=0)
+
+        return w
+
+    def _build_equivalent_cli(a) -> str:
+        argv = ['python3', os.path.basename(__file__), a.logfile]
+
+        argv += ['--interval', str(a.interval)]
+        argv += ['--top-nodes', str(a.top_nodes)]
+        if a.errors_only:
+            argv += ['--errors-only']
+        if a.node:
+            argv += ['--node', str(a.node)]
+        if a.focus_node:
+            argv += ['--focus-node', str(a.focus_node)]
+        if a.csv:
+            argv += ['--csv', str(a.csv)]
+        if a.time_from:
+            argv += ['--from', str(a.time_from)]
+        if a.time_to:
+            argv += ['--to', str(a.time_to)]
+        if a.full:
+            argv += ['--full']
+
+        if a.follow:
+            argv += ['--follow']
+            argv += ['--window', str(a.window)]
+            argv += ['--refresh', str(a.refresh)]
+            argv += ['--tail', str(a.tail)]
+
+        return ' '.join(shlex.quote(x) for x in argv)
+
+    interactive = bool(args.interactive)
+    if not interactive and args.logfile is None and _is_tty():
+        interactive = True
+
+    if interactive and not _is_tty():
+        parser.error('--interactive 는 TTY에서만 사용할 수 있습니다')
+
+    if interactive:
+        try:
+            args = _run_interactive_wizard(args)
+        except KeyboardInterrupt:
+            print("\n취소됨")
+            return
+
+        print("\n선택한 옵션:")
+        print(f"  logfile     : {args.logfile}")
+        print(f"  follow      : {args.follow}")
+        print(f"  full        : {args.full}")
+        print(f"  interval    : {args.interval}")
+        print(f"  top-nodes   : {args.top_nodes}")
+        print(f"  errors-only : {args.errors_only}")
+        print(f"  node        : {args.node}")
+        print(f"  focus-node  : {args.focus_node}")
+        print(f"  csv         : {args.csv}")
+        print(f"  from/to     : {args.time_from} ~ {args.time_to}")
+        if args.follow:
+            print(f"  window      : {args.window}")
+            print(f"  refresh     : {args.refresh}")
+            print(f"  tail        : {args.tail}")
+
+        print("\nCLI 힌트:")
+        print(f"  {_build_equivalent_cli(args)}")
+        print()
+
+    if args.logfile is None:
+        parser.error('logfile 인자가 필요합니다 (또는 --interactive 사용)')
 
     # 실시간 모니터링 모드
     if args.follow:
@@ -1584,4 +2149,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n취소됨")
+        raise SystemExit(130)
