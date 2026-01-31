@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# Log files
+log/
+*.log
+
+# Reports and checkpoints
+reports/.checkpoint.json
