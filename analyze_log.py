@@ -1370,8 +1370,8 @@ def main():
                         help='실시간 모드 대시보드 갱신 주기(초) [기본: 2]')
     parser.add_argument('--tail', type=int, default=5000,
                         help='실시간 모드 시작 시 읽어올 마지막 줄 수 [기본: 5000, 0=파일 끝부터]')
-    parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='ko',
-                        help='Output language / 출력 언어 (ko: 한국어, en: English) [default: ko]')
+    parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='en',
+                        help='Output language / 출력 언어 (ko: 한국어, en: English) [default: en]')
 
     args = parser.parse_args()
     set_lang(args.lang)

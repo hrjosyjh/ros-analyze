@@ -1,10 +1,10 @@
 """Internationalization support for ROS2 log analyzer tools.
 
 Supported languages: ko (Korean), en (English)
-Default: ko
+Default: en
 """
 
-_lang = 'ko'
+_lang = 'en'
 
 
 def set_lang(lang: str):

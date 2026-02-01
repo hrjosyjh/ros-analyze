@@ -1,0 +1,13 @@
+﻿[시간대별 통계]
+time_bucket,total,fatal,error,warn,info,debug,top_node_1,top_node_1_count,top_node_2,top_node_2_count,top_node_3,top_node_3_count
+2025-01-28 02:00,3,0,1,1,1,0,test_node,2,other_node,1,,0
+
+[노드별 통계]
+rank,node,total_count,percent,fatal,error,warn,info,debug
+1,test_node,2,66.67,0,1,0,1,0
+2,other_node,1,33.33,0,0,1,0,0
+
+[에러 목록]
+timestamp,level,node,message
+2025-01-28 02:46:41,ERROR,test_node,1738000001.456 [ERROR] [test_node]: something failed
+2025-01-28 02:46:42,WARN,other_node,1738000002.789 [WARN] [other_node]: warning msg

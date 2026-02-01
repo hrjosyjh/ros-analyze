@@ -219,7 +219,7 @@ def main():
                         help='Start time / 분석 시작 시각 (e.g. "2026-01-27", "2026-01-27 09:00", "09:00")')
     parser.add_argument('--to', dest='time_to', default=None,
                         help='End time / 분석 종료 시각 (e.g. "2026-01-28", "2026-01-27 18:00", "18:00")')
-    parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='ko',
+    parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='en',
                         help='Output language / 출력 언어 (ko: 한국어, en: English) [default: ko]')
 
     args = parser.parse_args()
