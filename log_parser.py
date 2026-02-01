@@ -11,6 +11,8 @@ import re
 from datetime import datetime
 from typing import Optional, Tuple
 
+from i18n import t
+
 
 # =============================================================================
 #  Log line parser (regexes/constants)
@@ -117,8 +119,10 @@ def parse_datetime_arg(s: str) -> float:
             continue
 
     raise ValueError(
-        f"시간 형식을 인식할 수 없습니다: '{s}'\n"
-        f"  지원 형식: 2026-01-27, 2026-01-27 09:00, 2026-01-27 09:00:00, 09:00, 09:00:00"
+        t(f"시간 형식을 인식할 수 없습니다: '{s}'\n"
+          f"  지원 형식: 2026-01-27, 2026-01-27 09:00, 2026-01-27 09:00:00, 09:00, 09:00:00",
+          f"Unrecognized time format: '{s}'\n"
+          f"  Supported formats: 2026-01-27, 2026-01-27 09:00, 2026-01-27 09:00:00, 09:00, 09:00:00")
     )
 
 

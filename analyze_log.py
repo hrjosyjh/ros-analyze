@@ -41,6 +41,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
 from log_parser import RE_ANSI, bucket_key, bucket_label, parse_datetime_arg, parse_interval, parse_line
+from i18n import set_lang, t
 
 
 # --- 메인 분석 ---
@@ -179,36 +180,36 @@ class LogAnalyzer:
 
     def print_report(self, top_nodes=5):
         if self.parsed_lines == 0:
-            print("파싱된 로그 라인이 없습니다.")
+            print(t("파싱된 로그 라인이 없습니다.", "No parsed log lines found."))
             return
         if self.matched_lines == 0:
-            print("필터에 매칭되는 로그 라인이 없습니다.")
+            print(t("필터에 매칭되는 로그 라인이 없습니다.", "No log lines matching the filter."))
             return
 
         sorted_buckets = sorted(self.bucket_total.keys())
 
         # --- 전체 요약 ---
         print("=" * 90)
-        print("  ROS2 AGV 로그 시간대별 분석 보고서")
+        print(f"  {t('ROS2 AGV 로그 시간대별 분석 보고서', 'ROS2 AGV Time-Based Log Analysis Report')}")
         print("=" * 90)
         print()
-        print(f"  파일 분석 완료")
-        print(f"  총 라인 수       : {self.total_lines:>15,}")
-        print(f"  파싱 성공        : {self.parsed_lines:>15,}")
-        print(f"  파싱 실패        : {self.unparsed_lines:>15,}")
-        print(f"  시간 범위        : {datetime.fromtimestamp(self.ts_min).strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  {t('파일 분석 완료', 'File analysis complete')}")
+        print(f"  {t('총 라인 수', 'Total lines'):<15}: {self.total_lines:>15,}")
+        print(f"  {t('파싱 성공', 'Parsed OK'):<15}: {self.parsed_lines:>15,}")
+        print(f"  {t('파싱 실패', 'Parse failed'):<15}: {self.unparsed_lines:>15,}")
+        print(f"  {t('시간 범위', 'Time range'):<15}: {datetime.fromtimestamp(self.ts_min).strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"                   ~ {datetime.fromtimestamp(self.ts_max).strftime('%Y-%m-%d %H:%M:%S')}")
         duration = self.ts_max - self.ts_min
         days = int(duration // 86400)
         hours = int((duration % 86400) // 3600)
         mins = int((duration % 3600) // 60)
-        print(f"  총 기간          : {days}일 {hours}시간 {mins}분")
-        print(f"  분석 단위        : {format_interval(self.interval_sec)}")
+        print(f"  {t('총 기간', 'Duration'):<15}: {t(f'{days}일 {hours}시간 {mins}분', f'{days}d {hours}h {mins}m')}")
+        print(f"  {t('분석 단위', 'Interval'):<15}: {format_interval(self.interval_sec)}")
         print()
 
         # --- 로그 레벨별 전체 통계 ---
         print("-" * 90)
-        print("  [로그 레벨별 전체 통계]")
+        print(f"  [{t('로그 레벨별 전체 통계', 'Log Level Statistics')}]")
         print("-" * 90)
         level_order = ['FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG']
         for lvl in level_order:
@@ -221,7 +222,7 @@ class LogAnalyzer:
 
         # --- 노드별 전체 통계 (상위 N개) ---
         print("-" * 90)
-        print(f"  [노드별 전체 통계 - 상위 {top_nodes}개]")
+        print(f"  [{t('노드별 전체 통계', 'Node Statistics')} - {t('상위', 'Top')} {top_nodes}{t('개', '')}]")
         print("-" * 90)
         sorted_nodes = sorted(self.node_totals.items(), key=lambda x: (-x[1], x[0]))
         max_node_count = sorted_nodes[0][1] if sorted_nodes else 1
@@ -233,12 +234,12 @@ class LogAnalyzer:
         if len(sorted_nodes) > top_nodes:
             others = sum(c for _, c in sorted_nodes[top_nodes:])
             pct = others / self.matched_lines * 100
-            print(f"  {'(기타 ' + str(len(sorted_nodes) - top_nodes) + '개 노드)':<40} {others:>12,}  ({pct:>5.1f}%)")
+            print(f"  {t('(기타 ' + str(len(sorted_nodes) - top_nodes) + '개 노드)', '(other ' + str(len(sorted_nodes) - top_nodes) + ' nodes)'):<40} {others:>12,}  ({pct:>5.1f}%)")
         print()
 
         # --- 시간대별 로그 볼륨 ---
         print("-" * 90)
-        print("  [시간대별 로그 볼륨]")
+        print(f"  [{t('시간대별 로그 볼륨', 'Log Volume by Time')}]")
         print("-" * 90)
         max_count = max(self.bucket_total.values()) if self.bucket_total else 1
         avg_count = sum(self.bucket_total.values()) / len(self.bucket_total) if self.bucket_total else 0
@@ -271,9 +272,9 @@ class LogAnalyzer:
 
         # --- 시간대별 로그 레벨 분포 ---
         print("-" * 90)
-        print("  [시간대별 로그 레벨 분포]")
+        print(f"  [{t('시간대별 로그 레벨 분포', 'Log Level Distribution by Time')}]")
         print("-" * 90)
-        header = f"  {'시간대':<20} {'FATAL':>8} {'ERROR':>8} {'WARN':>8} {'INFO':>10} {'DEBUG':>8} {'합계':>10}"
+        header = f"  {t('시간대', 'Time'):<20} {'FATAL':>8} {'ERROR':>8} {'WARN':>8} {'INFO':>10} {'DEBUG':>8} {t('합계', 'Total'):>10}"
         print(header)
         print("  " + "-" * 78)
         for bk in sorted_buckets:
@@ -290,7 +291,7 @@ class LogAnalyzer:
 
         # --- 시간대별 상위 노드 ---
         print("-" * 90)
-        print(f"  [시간대별 상위 활동 노드 (Top 3)]")
+        print(f"  [{t('시간대별 상위 활동 노드 (Top 3)', 'Top Active Nodes by Time (Top 3)')}]")
         print("-" * 90)
         for bk in sorted_buckets:
             label = bucket_label(bk, self.interval_sec)
@@ -303,7 +304,7 @@ class LogAnalyzer:
         # --- 에러/경고 메시지 요약 ---
         if self.error_messages:
             print("-" * 90)
-            print(f"  [ERROR/WARN/FATAL 메시지 샘플 (최대 {self.max_error_msgs}개)]")
+            print(f"  [{t(f'ERROR/WARN/FATAL 메시지 샘플 (최대 {self.max_error_msgs}개)', f'ERROR/WARN/FATAL Message Samples (max {self.max_error_msgs})')}]")
             print("-" * 90)
 
             # 에러 메시지를 유형별로 그룹핑
@@ -323,31 +324,31 @@ class LogAnalyzer:
                     if n == node and l == level:
                         # 타임스탬프 이후 메시지 부분만 추출
                         short_msg = msg[msg.find(']', msg.find(node)) + 1:].strip() if node in msg else msg[-120:]
-                        print(f"         예시: {short_msg[:120]}")
+                        print(f"         {t('예시', 'Example')}: {short_msg[:120]}")
                         break
                 print()
 
         # --- 포커스 노드 상세 ---
         if self.focus_query is not None:
             print("-" * 90)
-            print("  [포커스 노드 상세]")
+            print(f"  [{t('포커스 노드 상세', 'Focus Node Details')}]")
             print("-" * 90)
-            print(f"  포커스 쿼리: {self.focus_query if self.focus_query else '(빈 문자열)'}")
+            print(f"  {t('포커스 쿼리', 'Focus query')}: {self.focus_query if self.focus_query else t('(빈 문자열)', '(empty string)')}")
 
             if not self.focus_query:
-                print("  포커스 쿼리가 비어 있어 상세 집계를 생략합니다.")
+                print(t("  포커스 쿼리가 비어 있어 상세 집계를 생략합니다.", "  Focus query is empty, skipping detailed aggregation."))
                 print()
                 return
 
             focus_nodes = [(n, c) for n, c in self.node_totals.items() if self.focus_query in n]
             focus_nodes.sort(key=lambda x: (-x[1], x[0]))
-            print(f"  매칭 노드 수: {len(focus_nodes):,}개")
+            print(f"  {t('매칭 노드 수', 'Matched nodes')}: {len(focus_nodes):,}{t('개', '')}")
             if focus_nodes:
                 top_list = ", ".join(f"{n}({c:,})" for n, c in focus_nodes[:10])
-                print(f"  매칭 노드 Top10: {top_list}")
+                print(f"  {t('매칭 노드 Top10', 'Matched nodes Top10')}: {top_list}")
 
             if self.focus_total == 0:
-                print("\n  포커스 노드에 매칭되는 로그가 없습니다.\n")
+                print("\n" + t("  포커스 노드에 매칭되는 로그가 없습니다.", "  No logs matching the focus node.") + "\n")
                 return
 
             # 기본 통계
@@ -356,19 +357,19 @@ class LogAnalyzer:
             duration = self.focus_ts_max - self.focus_ts_min
 
             print()
-            print(f"  총 로그 수   : {self.focus_total:>12,}")
-            print(f"  시작 시각    : {datetime.fromtimestamp(self.focus_ts_min).strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"  마지막 시각  : {datetime.fromtimestamp(self.focus_ts_max).strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  {t('총 로그 수', 'Total logs'):<13}: {self.focus_total:>12,}")
+            print(f"  {t('시작 시각', 'Start time'):<13}: {datetime.fromtimestamp(self.focus_ts_min).strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  {t('마지막 시각', 'Last time'):<13}: {datetime.fromtimestamp(self.focus_ts_max).strftime('%Y-%m-%d %H:%M:%S')}")
             if duration >= 60:
-                print(f"  활동 기간    : {int(duration // 3600)}시간 {int((duration % 3600) // 60)}분 {int(duration % 60)}초")
+                print(f"  {t('활동 기간', 'Duration'):<13}: {int(duration // 3600)}{t('시간', 'h')} {int((duration % 3600) // 60)}{t('분', 'm')} {int(duration % 60)}{t('초', 's')}")
             else:
-                print(f"  활동 기간    : {duration:.1f}초")
+                print(f"  {t('활동 기간', 'Duration'):<13}: {duration:.1f}{t('초', 's')}")
             if duration > 0:
-                print(f"  평균 처리율  : {self.focus_total / duration:.1f} lines/sec")
+                print(f"  {t('평균 처리율', 'Avg rate'):<13}: {self.focus_total / duration:.1f} lines/sec")
             print()
 
             # 레벨 분포
-            print("  [포커스 로그 레벨 분포]")
+            print(f"  [{t('포커스 로그 레벨 분포', 'Focus Log Level Distribution')}]")
             for lvl in ['FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG']:
                 cnt = self.focus_levels.get(lvl, 0)
                 if cnt > 0:
@@ -382,7 +383,7 @@ class LogAnalyzer:
                 sorted_bks = sorted(self.focus_timeline.keys())
                 max_count = max(self.focus_timeline.values())
 
-                print(f"  [포커스 시간대별 활동 타임라인]  (단위: {format_interval(self.interval_sec)})")
+                print(f"  [{t('포커스 시간대별 활동 타임라인', 'Focus Activity Timeline')}]  ({t('단위', 'Unit')}: {format_interval(self.interval_sec)})")
                 for bk in sorted_bks:
                     total = self.focus_timeline[bk]
                     label = bucket_label(bk, self.interval_sec)
@@ -409,19 +410,19 @@ class LogAnalyzer:
                 peaks = [(bk, c) for bk, c in self.focus_timeline.items() if avg > 0 and c > avg * 2]
                 if peaks:
                     peaks.sort(key=lambda x: x[1], reverse=True)
-                    print(f"  포커스 피크 구간 (평균 {avg:,.0f}의 2배 이상):")
+                    print(f"  {t(f'포커스 피크 구간 (평균 {avg:,.0f}의 2배 이상):', f'Focus peak intervals (>2x avg {avg:,.0f}):')}")
                     for bk, c in peaks[:5]:
                         label = bucket_label(bk, self.interval_sec)
                         print(f"    {label}  →  {c:,} ({c / avg:.1f}x)")
                     print()
                 else:
-                    print(f"  포커스 피크 구간: 없음 (평균 {avg:,.0f})")
+                    print(f"  {t(f'포커스 피크 구간: 없음 (평균 {avg:,.0f})', f'Focus peak intervals: none (avg {avg:,.0f})')}")
                     print()
 
             # 에러/경고 패턴 요약 (샘플 기반, bounded)
-            print(f"  [포커스 에러/경고 메시지 패턴]  (ERROR/FATAL {err_cnt:,} + WARN {warn_cnt:,} 중 샘플 {len(self.focus_error_samples)}건)")
+            print(f"  [{t('포커스 에러/경고 메시지 패턴', 'Focus Error/Warning Message Patterns')}]  (ERROR/FATAL {err_cnt:,} + WARN {warn_cnt:,} {t('중 샘플', 'samples')} {len(self.focus_error_samples)}{t('건', '')})")
             if not self.focus_error_samples:
-                print("  (샘플 없음)")
+                print(t("  (샘플 없음)", "  (no samples)"))
                 print()
                 return
 
@@ -438,7 +439,7 @@ class LogAnalyzer:
             sorted_patterns = sorted(patterns.items(), key=lambda x: x[1].count, reverse=True)
             for (level, prefix), info in sorted_patterns[:20]:
                 print(f"  [{level}] x{info.count:,}  {prefix}")
-                print(f"         예시: {info.example}")
+                print(f"         {t('예시', 'Example')}: {info.example}")
             print()
 
     def export_csv(self, filepath):
@@ -523,17 +524,17 @@ class LogAnalyzer:
                     clean = RE_ANSI.sub('', msg)
                     writer.writerow([dt_str, level, node, clean])
 
-        print(f"  CSV 저장: {filepath}")
+        print(f"  {t('CSV 저장', 'CSV saved')}: {filepath}")
         print()
 
 
 def format_interval(sec):
     if sec >= 3600:
-        return f"{sec // 3600}시간"
+        return f"{sec // 3600}{t('시간', 'h')}"
     elif sec >= 60:
-        return f"{sec // 60}분"
+        return f"{sec // 60}{t('분', 'm')}"
     else:
-        return f"{sec}초"
+        return f"{sec}{t('초', 's')}"
 
 
 # =============================================================================
@@ -867,8 +868,8 @@ class LiveMonitor:
 
         # --- 헤더 ---
         lines.append(f"{TERM_BOLD}{TERM_CYAN}{'═' * w}{TERM_RESET}")
-        title = "ROS2 AGV 실시간 로그 모니터"
-        quit_hint = "Ctrl+C: 종료"
+        title = t("ROS2 AGV 실시간 로그 모니터", "ROS2 AGV Real-time Log Monitor")
+        quit_hint = t("Ctrl+C: 종료", "Ctrl+C: Quit")
         pad = w - len(title) - len(quit_hint) - 4
         lines.append(f"{TERM_BOLD}{TERM_CYAN}  {title}{' ' * max(pad, 1)}{TERM_DIM}{quit_hint}{TERM_RESET}")
         lines.append(f"{TERM_BOLD}{TERM_CYAN}{'═' * w}{TERM_RESET}")
@@ -876,22 +877,22 @@ class LiveMonitor:
         # --- 상태 바 ---
         rate = self._calc_rate()
         win_count = len(self.events)
-        elapsed_str = f"{int(wall_elapsed // 60)}분 {int(wall_elapsed % 60)}초"
+        elapsed_str = f"{int(wall_elapsed // 60)}{t('분', 'm')} {int(wall_elapsed % 60)}{t('초', 's')}"
 
         filters = []
         if self.node_filter:
-            filters.append(f"노드={self.node_filter}")
+            filters.append(f"{t('노드', 'Node')}={self.node_filter}")
         if self.focus_query:
-            filters.append(f"포커스={self.focus_query}")
+            filters.append(f"{t('포커스', 'Focus')}={self.focus_query}")
         if self.errors_only:
-            filters.append("에러만")
-        filter_str = f"  필터: {', '.join(filters)}" if filters else ""
+            filters.append(t("에러만", "errors only"))
+        filter_str = f"  {t('필터', 'Filter')}: {', '.join(filters)}" if filters else ""
 
         lines.append(
-            f"  로그 시각: {TERM_BOLD}{now_dt.strftime('%Y-%m-%d %H:%M:%S')}{TERM_RESET}"
-            f"  |  윈도우: {format_interval(self.window_sec)}"
-            f"  |  경과: {elapsed_str}"
-            f"  |  처리율: {TERM_GREEN}{rate:,.0f}{TERM_RESET} lines/s"
+            f"  {t('로그 시각', 'Log time')}: {TERM_BOLD}{now_dt.strftime('%Y-%m-%d %H:%M:%S')}{TERM_RESET}"
+            f"  |  {t('윈도우', 'Window')}: {format_interval(self.window_sec)}"
+            f"  |  {t('경과', 'Elapsed')}: {elapsed_str}"
+            f"  |  {t('처리율', 'Rate')}: {TERM_GREEN}{rate:,.0f}{TERM_RESET} lines/s"
             f"{filter_str}"
         )
         lines.append("")
@@ -909,7 +910,7 @@ class LiveMonitor:
 
         total_in_win = sum(win_levels.values())
 
-        lines.append(f"  {TERM_BOLD}[윈도우 내 통계]  총 {total_in_win:,}건  (최근 {format_interval(self.window_sec)}){TERM_RESET}")
+        lines.append(f"  {TERM_BOLD}{t('[윈도우 내 통계]', '[Window Statistics]')}  {t('총', 'Total')} {total_in_win:,}{t('건', '')}  ({t('최근', 'Last')} {format_interval(self.window_sec)}){TERM_RESET}")
         lines.append(f"  {'─' * (w - 4)}")
 
         level_parts = []
@@ -917,7 +918,7 @@ class LiveMonitor:
             cnt = win_levels.get(lvl, 0)
             if cnt > 0:
                 level_parts.append(f"{color}{lvl}: {cnt:,}{TERM_RESET}")
-        lines.append(f"  레벨:  {'  |  '.join(level_parts) if level_parts else '(없음)'}")
+        lines.append(f"  {t('레벨', 'Level')}:  {'  |  '.join(level_parts) if level_parts else t('(없음)', '(none)')}")
 
         # 누적 통계 한 줄
         cum_parts = []
@@ -925,7 +926,7 @@ class LiveMonitor:
             cnt = self.total_levels.get(lvl, 0)
             if cnt > 0:
                 cum_parts.append(f"{color}{lvl}: {cnt:,}{TERM_RESET}")
-        lines.append(f"  누적:  {'  |  '.join(cum_parts)}  {TERM_DIM}(전체 {self.parsed_lines:,}줄){TERM_RESET}")
+        lines.append(f"  {t('누적', 'Cumul.')}:  {'  |  '.join(cum_parts)}  {TERM_DIM}({t('전체', 'Total')} {self.parsed_lines:,}{t('줄', 'lines')}){TERM_RESET}")
         lines.append("")
 
         # --- 윈도우 내 시간대별 바 차트 ---
@@ -936,7 +937,7 @@ class LiveMonitor:
             if len(sorted_bks) > max_bars:
                 sorted_bks = sorted_bks[-max_bars:]
 
-            lines.append(f"  {TERM_BOLD}[시간대별 로그 볼륨]{TERM_RESET}  (단위: {format_interval(self.interval_sec)})")
+            lines.append(f"  {TERM_BOLD}{t('[시간대별 로그 볼륨]', '[Log Volume by Time]')}{TERM_RESET}  ({t('단위', 'Unit')}: {format_interval(self.interval_sec)})")
             lines.append(f"  {'─' * (w - 4)}")
 
             bucket_totals = {bk: sum(win_buckets[bk].values()) for bk in sorted_bks}
@@ -969,7 +970,7 @@ class LiveMonitor:
             sorted_wn = sorted(win_nodes.items(), key=lambda x: (-x[1], x[0]))[:7]
             max_wn = sorted_wn[0][1] if sorted_wn else 1
 
-            lines.append(f"  {TERM_BOLD}[활동 노드 Top {min(7, len(sorted_wn))}]{TERM_RESET}")
+            lines.append(f"  {TERM_BOLD}[{t('활동 노드', 'Active Nodes')} Top {min(7, len(sorted_wn))}]{TERM_RESET}")
             lines.append(f"  {'─' * (w - 4)}")
 
             for node, cnt in sorted_wn:
@@ -982,10 +983,10 @@ class LiveMonitor:
 
         # --- 포커스 패널 ---
         if self.focus_query:
-            lines.append(f"  {TERM_BOLD}[포커스 노드]{TERM_RESET}  쿼리='{self.focus_query}'")
+            lines.append(f"  {TERM_BOLD}{t('[포커스 노드]', '[Focus Node]')}{TERM_RESET}  {t('쿼리', 'query')}='{self.focus_query}'")
             lines.append(f"  {'─' * (w - 4)}")
             if self.focus_total <= 0:
-                lines.append("  (아직 매칭 로그 없음)")
+                lines.append(f"  {t('(아직 매칭 로그 없음)', '(no matching logs yet)')}")
                 lines.append("")
             else:
                 win_parts = []
@@ -994,8 +995,8 @@ class LiveMonitor:
                     if cnt > 0:
                         win_parts.append(f"{color}{lvl}:{cnt:,}{TERM_RESET}")
                 lines.append(
-                    f"  윈도우: 총 {self.focus_win_total:,}건"
-                    f"  |  {'  '.join(win_parts) if win_parts else '(없음)'}"
+                    f"  {t('윈도우', 'Window')}: {t('총', 'Total')} {self.focus_win_total:,}{t('건', '')}"
+                    f"  |  {'  '.join(win_parts) if win_parts else t('(없음)', '(none)')}"
                 )
 
                 cum_parts = []
@@ -1004,15 +1005,15 @@ class LiveMonitor:
                     if cnt > 0:
                         cum_parts.append(f"{color}{lvl}:{cnt:,}{TERM_RESET}")
                 lines.append(
-                    f"  누적  : 총 {self.focus_total:,}건"
-                    f"  |  {'  '.join(cum_parts) if cum_parts else '(없음)'}"
+                    f"  {t('누적', 'Cumul.')}  : {t('총', 'Total')} {self.focus_total:,}{t('건', '')}"
+                    f"  |  {'  '.join(cum_parts) if cum_parts else t('(없음)', '(none)')}"
                 )
 
                 if self.focus_recent_alerts:
                     available_rows = max(rows - len(lines) - 3, 0)
                     alert_count = min(8, len(self.focus_recent_alerts), available_rows)
                     if alert_count > 0:
-                        lines.append(f"  {TERM_BOLD}[포커스 최근 에러/경고]{TERM_RESET}")
+                        lines.append(f"  {TERM_BOLD}{t('[포커스 최근 에러/경고]', '[Focus Recent Errors/Warnings]')}{TERM_RESET}")
                         recent = list(self.focus_recent_alerts)[-alert_count:]
                         for dt_str, node, level, msg in recent:
                             if level == 'FATAL':
@@ -1031,7 +1032,7 @@ class LiveMonitor:
         if self.recent_alerts:
             available_rows = max(rows - len(lines) - 3, 3)
             alert_count = min(20, len(self.recent_alerts), available_rows)
-            lines.append(f"  {TERM_BOLD}[최근 에러/경고]{TERM_RESET}")
+            lines.append(f"  {TERM_BOLD}{t('[최근 에러/경고]', '[Recent Errors/Warnings]')}{TERM_RESET}")
             lines.append(f"  {'─' * (w - 4)}")
 
             recent = list(self.recent_alerts)[-alert_count:]
@@ -1221,14 +1222,14 @@ def run_follow_mode(args, interval_sec, window_sec):
         sys.stdout.flush()
 
     # 종료 시 최종 요약 출력
-    print(f"\n\n  실시간 모니터링 종료")
-    print(f"  총 처리 라인: {monitor.total_lines:,}")
-    print(f"  파싱 성공: {monitor.parsed_lines:,}")
+    print(f"\n\n  {t('실시간 모니터링 종료', 'Real-time monitoring ended')}")
+    print(f"  {t('총 처리 라인', 'Total processed lines')}: {monitor.total_lines:,}")
+    print(f"  {t('파싱 성공', 'Parsed OK')}: {monitor.parsed_lines:,}")
     duration = time.time() - monitor.start_wall
-    print(f"  모니터링 시간: {int(duration // 60)}분 {int(duration % 60)}초")
+    print(f"  {t('모니터링 시간', 'Monitoring duration')}: {int(duration // 60)}{t('분', 'm')} {int(duration % 60)}{t('초', 's')}")
 
     if monitor.total_levels:
-        print(f"\n  누적 로그 레벨:")
+        print(f"\n  {t('누적 로그 레벨', 'Cumulative log levels')}:")
         for lvl in ['FATAL', 'ERROR', 'WARN', 'INFO', 'DEBUG']:
             cnt = monitor.total_levels.get(lvl, 0)
             if cnt > 0:
@@ -1301,7 +1302,7 @@ def run_follow_mode(args, interval_sec, window_sec):
                 for dt_str, node, level, msg in monitor.recent_alerts:
                     writer.writerow([dt_str, level, node, RE_ANSI.sub('', msg)])
 
-        print(f"\n  CSV 저장: {filepath}")
+        print(f"\n  {t('CSV 저장', 'CSV saved')}: {filepath}")
         print()
 
 
@@ -1369,8 +1370,11 @@ def main():
                         help='실시간 모드 대시보드 갱신 주기(초) [기본: 2]')
     parser.add_argument('--tail', type=int, default=5000,
                         help='실시간 모드 시작 시 읽어올 마지막 줄 수 [기본: 5000, 0=파일 끝부터]')
+    parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='ko',
+                        help='Output language / 출력 언어 (ko: 한국어, en: English) [default: ko]')
 
     args = parser.parse_args()
+    set_lang(args.lang)
 
     def _is_tty() -> bool:
         try:
@@ -1398,7 +1402,7 @@ def main():
                 return True
             if s in ('n', 'no', '0', 'false', 'f'):
                 return False
-            print("  y/n 로 입력하세요")
+            print(t("  y/n 로 입력하세요", "  Please enter y/n"))
 
     def _prompt_int(prompt: str, default=None, min_value=None):
         while True:
@@ -1408,10 +1412,10 @@ def main():
             try:
                 v = int(s)
             except ValueError:
-                print("  숫자를 입력하세요")
+                print(t("  숫자를 입력하세요", "  Please enter a number"))
                 continue
             if min_value is not None and v < min_value:
-                print(f"  {min_value} 이상으로 입력하세요")
+                print(t(f"  {min_value} 이상으로 입력하세요", f"  Please enter {min_value} or higher"))
                 continue
             return v
 
@@ -1423,10 +1427,10 @@ def main():
             try:
                 v = float(s)
             except ValueError:
-                print("  숫자를 입력하세요")
+                print(t("  숫자를 입력하세요", "  Please enter a number"))
                 continue
             if min_value is not None and v < min_value:
-                print(f"  {min_value} 이상으로 입력하세요")
+                print(t(f"  {min_value} 이상으로 입력하세요", f"  Please enter {min_value} or higher"))
                 continue
             return v
 
@@ -1459,12 +1463,12 @@ def main():
                 if default:
                     s = str(default)
                 else:
-                    print("  파일 경로를 입력하세요")
+                    print(t("  파일 경로를 입력하세요", "  Please enter a file path"))
                     continue
             p = os.path.expanduser(s)
             if os.path.isfile(p):
                 return p
-            print(f"  파일을 찾을 수 없습니다: {p}")
+            print(t(f"  파일을 찾을 수 없습니다: {p}", f"  File not found: {p}"))
 
     def _logfile_candidates(default=None):
         """Shallow logfile discovery: cwd + ./log only."""
@@ -1524,7 +1528,7 @@ def main():
                 try:
                     names = os.listdir(d)
                 except OSError as e:
-                    msg = f"디렉터리를 열 수 없습니다: {e}"
+                    msg = t(f"디렉터리를 열 수 없습니다: {e}", f"Cannot open directory: {e}")
                     return [], [], []
 
                 dirs = []
@@ -1570,12 +1574,12 @@ def main():
                     stdscr.erase()
 
                     if h < 6 or w < 24:
-                        _safe_addnstr(stdscr, 0, 0, "logfile 탐색", max(0, w - 1))
-                        _safe_addnstr(stdscr, 2, 0, "터미널이 너무 작습니다", max(0, w - 1))
-                        _safe_addnstr(stdscr, 3, 0, "q=직접입력", max(0, w - 1))
+                        _safe_addnstr(stdscr, 0, 0, t("logfile 탐색", "Browse logfile"), max(0, w - 1))
+                        _safe_addnstr(stdscr, 2, 0, t("터미널이 너무 작습니다", "Terminal too small"), max(0, w - 1))
+                        _safe_addnstr(stdscr, 3, 0, t("q=직접입력", "q=manual input"), max(0, w - 1))
                         stdscr.refresh()
                     else:
-                        header0 = "logfile 탐색 (↑/↓, Enter=열기/선택, Backspace=상위, g=./log, q=직접입력)"
+                        header0 = t("logfile 탐색 (↑/↓, Enter=열기/선택, Backspace=상위, g=./log, q=직접입력)", "Browse logfile (↑/↓, Enter=open/select, Backspace=parent, g=./log, q=manual)")
                         _safe_addnstr(stdscr, 0, 0, header0, max(0, w - 1))
                         _safe_addnstr(stdscr, 1, 0, f"{cur_dir}", max(0, w - 1))
                         if msg:
@@ -1603,7 +1607,7 @@ def main():
                             if kind == 'dir':
                                 label = f"[D] {name}"
                             elif kind == 'manual':
-                                label = "직접 입력..."
+                                label = t("직접 입력...", "Manual input...")
                             else:
                                 label = f"    {name}"
 
@@ -1643,7 +1647,7 @@ def main():
                         top = 0
                         msg = ""
                     else:
-                        msg = "./log 디렉터리가 없습니다"
+                        msg = t("./log 디렉터리가 없습니다", "./log directory not found")
                     continue
                 if ch in (curses.KEY_ENTER, 10, 13):
                     kind, name = entries[idx]
@@ -1659,7 +1663,7 @@ def main():
                             if os.path.isdir(next_dir):
                                 cur_dir = next_dir
                             else:
-                                msg = f"디렉터리를 찾을 수 없습니다: {next_dir}"
+                                msg = t(f"디렉터리를 찾을 수 없습니다: {next_dir}", f"Directory not found: {next_dir}")
                         idx = 0
                         top = 0
                         continue
@@ -1667,7 +1671,7 @@ def main():
                     p = os.path.join(cur_dir, name)
                     if os.path.isfile(p):
                         return p
-                    msg = f"파일을 찾을 수 없습니다: {p}"
+                    msg = t(f"파일을 찾을 수 없습니다: {p}", f"File not found: {p}")
 
         def _run(stdscr):
             # Main menu: quick candidates + browse + manual input
@@ -1696,12 +1700,12 @@ def main():
                     h, w = stdscr.getmaxyx()
                     stdscr.erase()
 
-                    title = "logfile 선택 (↑/↓, Enter, q=직접입력)"
+                    title = t("logfile 선택 (↑/↓, Enter, q=직접입력)", "Select logfile (↑/↓, Enter, q=manual)")
                     _safe_addnstr(stdscr, 0, 0, title, max(0, w - 1))
 
                     if h < 6 or w < 24:
-                        _safe_addnstr(stdscr, 2, 0, "터미널이 너무 작습니다", max(0, w - 1))
-                        _safe_addnstr(stdscr, 3, 0, "q=직접입력", max(0, w - 1))
+                        _safe_addnstr(stdscr, 2, 0, t("터미널이 너무 작습니다", "Terminal too small"), max(0, w - 1))
+                        _safe_addnstr(stdscr, 3, 0, t("q=직접입력", "q=manual input"), max(0, w - 1))
                         stdscr.refresh()
                     else:
                         visible_h = h - 2
@@ -1721,13 +1725,13 @@ def main():
                                 left = str(val)
                                 right = _logfile_meta_brief(str(val))
                             elif kind == 'browse':
-                                left = "탐색... (현재 디렉터리)"
+                                left = t("탐색... (현재 디렉터리)", "Browse... (current dir)")
                                 right = ""
                             elif kind == 'browse_log':
-                                left = "탐색... (./log)"
+                                left = t("탐색... (./log)", "Browse... (./log)")
                                 right = ""
                             else:
-                                left = "직접 입력..."
+                                left = t("직접 입력...", "Manual input...")
                                 right = ""
 
                             prefix = "> " if i == idx else "  "
@@ -1781,14 +1785,14 @@ def main():
         if not candidates:
             return None
 
-        print("\nlogfile 선택:")
+        print(f"\n{t('logfile 선택:', 'Select logfile:')}")
         for i, p in enumerate(candidates, 1):
             meta = _logfile_meta_brief(p)
             if meta:
                 print(f"  {i:2d}) {p}  ({meta})")
             else:
                 print(f"  {i:2d}) {p}")
-        print("   0) 직접 입력")
+        print(f"   0) {t('직접 입력', 'Manual input')}")
 
         while True:
             try:
@@ -1801,7 +1805,7 @@ def main():
                 return None
             if 1 <= v <= len(candidates):
                 return candidates[v - 1]
-            print(f"  0~{len(candidates)} 범위로 입력하세요")
+            print(t(f"  0~{len(candidates)} 범위로 입력하세요", f"  Please enter 0~{len(candidates)}"))
 
     def _pick_logfile_for_wizard(default=None):
         candidates = _logfile_candidates(default=default)
@@ -1816,8 +1820,8 @@ def main():
         return None
 
     def _run_interactive_wizard(existing_args):
-        print("\n[interactive] 옵션을 선택하세요 (Enter=기본값)")
-        print(
+        print(t("\n[interactive] 옵션을 선택하세요 (Enter=기본값)", "\n[interactive] Select options (Enter=default)"))
+        print(t(
             """[examples] 입력 예시
   follow(-f)      : y / n
   full(--full)    : y / n
@@ -1828,8 +1832,19 @@ def main():
   focus-node      : tsd            (부분 매칭, 빈칸=없음)
   csv(-c)         : reports/my_report.csv  (빈칸=자동)
   --from / --to   : 2026-01-27 | 2026-01-27 09:00 | 09:00  (오늘)
+""",
+            """[examples] Input examples
+  follow(-f)      : y / n
+  full(--full)    : y / n
+  interval(-i)    : 1h, 10m, 30s, 2(=2h)   (h/m/s supported, number only=hours)
+  top-nodes(-t)   : 10, 20
+  errors-only(-e) : y / n
+  node(-n)        : motor_driver   (partial match, empty=none)
+  focus-node      : tsd            (partial match, empty=none)
+  csv(-c)         : reports/my_report.csv  (empty=auto)
+  --from / --to   : 2026-01-27 | 2026-01-27 09:00 | 09:00  (today)
 """
-        )
+        ))
         w = argparse.Namespace(**vars(existing_args))
 
         picked = _pick_logfile_for_wizard(default=w.logfile)
@@ -1837,34 +1852,34 @@ def main():
             w.logfile = picked
         else:
             w.logfile = _prompt_existing_file('logfile', default=w.logfile)
-        w.follow = _prompt_bool('follow 모드(-f) 사용', default=bool(w.follow))
+        w.follow = _prompt_bool(t('follow 모드(-f) 사용', 'Use follow mode (-f)'), default=bool(w.follow))
 
-        w.full = _prompt_bool('전체 재분석(--full)', default=bool(w.full))
+        w.full = _prompt_bool(t('전체 재분석(--full)', 'Full re-analysis (--full)'), default=bool(w.full))
         w.interval = _prompt_interval('interval(-i) (예: 1h, 10m, 30s)', default=str(w.interval))
         w.top_nodes = _prompt_int('top-nodes(-t)', default=w.top_nodes, min_value=1)
         w.errors_only = _prompt_bool('errors-only(-e)', default=bool(w.errors_only))
 
         node_default = w.node if w.node is not None else ''
-        s = _prompt_line('node(-n) (부분 매칭, 빈칸=없음)', default=node_default).strip()
+        s = _prompt_line(t('node(-n) (부분 매칭, 빈칸=없음)', 'node(-n) (partial match, empty=none)'), default=node_default).strip()
         w.node = s or None
 
         focus_default = w.focus_node if w.focus_node is not None else ''
-        s = _prompt_line('focus-node (부분 매칭, 빈칸=없음)', default=focus_default).strip()
+        s = _prompt_line(t('focus-node (부분 매칭, 빈칸=없음)', 'focus-node (partial match, empty=none)'), default=focus_default).strip()
         w.focus_node = s or None
 
         csv_default = w.csv if w.csv is not None else ''
-        s = _prompt_line('csv(-c) (파일 경로, 빈칸=자동)', default=csv_default).strip()
+        s = _prompt_line(t('csv(-c) (파일 경로, 빈칸=자동)', 'csv(-c) (file path, empty=auto)'), default=csv_default).strip()
         w.csv = s or None
 
         tf_default = w.time_from if w.time_from is not None else ''
-        w.time_from = _prompt_datetime_optional('--from (빈칸=없음)', default=tf_default)
+        w.time_from = _prompt_datetime_optional(t('--from (빈칸=없음)', '--from (empty=none)'), default=tf_default)
         tt_default = w.time_to if w.time_to is not None else ''
-        w.time_to = _prompt_datetime_optional('--to (빈칸=없음)', default=tt_default)
+        w.time_to = _prompt_datetime_optional(t('--to (빈칸=없음)', '--to (empty=none)'), default=tt_default)
 
         if w.follow:
-            w.window = _prompt_interval('window(-w) (예: 5m, 10m)', default=str(w.window))
-            w.refresh = _prompt_float('refresh(-r) (초)', default=w.refresh, min_value=0.1)
-            w.tail = _prompt_int('tail (0=끝부터)', default=w.tail, min_value=0)
+            w.window = _prompt_interval(t('window(-w) (예: 5m, 10m)', 'window(-w) (e.g. 5m, 10m)'), default=str(w.window))
+            w.refresh = _prompt_float(t('refresh(-r) (초)', 'refresh(-r) (sec)'), default=w.refresh, min_value=0.1)
+            w.tail = _prompt_int(t('tail (0=끝부터)', 'tail (0=from end)'), default=w.tail, min_value=0)
 
         return w
 
@@ -1907,10 +1922,10 @@ def main():
         try:
             args = _run_interactive_wizard(args)
         except KeyboardInterrupt:
-            print("\n취소됨")
+            print(f"\n{t('취소됨', 'Cancelled')}")
             return
 
-        print("\n선택한 옵션:")
+        print(f"\n{t('선택한 옵션:', 'Selected options:')}")
         print(f"  logfile     : {args.logfile}")
         print(f"  follow      : {args.follow}")
         print(f"  full        : {args.full}")
@@ -1926,7 +1941,7 @@ def main():
             print(f"  refresh     : {args.refresh}")
             print(f"  tail        : {args.tail}")
 
-        print("\nCLI 힌트:")
+        print(f"\n{t('CLI 힌트:', 'CLI hint:')}")
         print(f"  {_build_equivalent_cli(args)}")
         print()
 
@@ -2003,48 +2018,48 @@ def main():
 
             if file_size < prev_size:
                 # 파일이 작아짐 → 로그 로테이션 감지 → 전체 분석
-                print(f"\n  로그 로테이션 감지 (이전 {prev_size:,} → 현재 {file_size:,} bytes)")
-                print(f"  전체 재분석을 수행합니다.")
+                print(f"\n  {t(f'로그 로테이션 감지 (이전 {prev_size:,} → 현재 {file_size:,} bytes)', f'Log rotation detected (prev {prev_size:,} → current {file_size:,} bytes)')}")
+                print(t("  전체 재분석을 수행합니다.", "  Performing full re-analysis."))
                 clear_checkpoint(args.logfile)
                 start_offset = 0
             elif file_size <= prev_size:
                 # 변경 없음
-                print(f"\n  마지막 분석: {prev_at}")
-                print(f"  새로 추가된 로그가 없습니다. (파일 크기: {file_size:,} bytes)")
-                print(f"  전체 재분석을 하려면 --full 옵션을 사용하세요.\n")
+                print(f"\n  {t('마지막 분석', 'Last analysis')}: {prev_at}")
+                print(t(f"  새로 추가된 로그가 없습니다. (파일 크기: {file_size:,} bytes)", f"  No new logs added. (file size: {file_size:,} bytes)"))
+                print(t("  전체 재분석을 하려면 --full 옵션을 사용하세요.\n", "  Use --full option for full re-analysis.\n"))
                 return
             else:
                 # 증분 분석
                 incremental = True
                 start_offset = prev_offset
                 new_bytes = file_size - prev_offset
-                print(f"\n  *** 증분 분석 모드 ***")
-                print(f"  마지막 분석   : {prev_at}")
+                print(t("\n  *** 증분 분석 모드 ***", "\n  *** Incremental analysis mode ***"))
+                print(f"  {t('마지막 분석', 'Last analysis'):<13}: {prev_at}")
                 if prev_ts:
-                    print(f"  마지막 로그   : {datetime.fromtimestamp(prev_ts).strftime('%Y-%m-%d %H:%M:%S')}")
-                print(f"  이전 위치     : {prev_offset:,} bytes ({prev_lines:,} 줄)")
-                print(f"  새 데이터     : {new_bytes / (1024**2):.1f} MB")
+                    print(f"  {t('마지막 로그', 'Last log'):<13}: {datetime.fromtimestamp(prev_ts).strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"  {t('이전 위치', 'Previous offset'):<13}: {prev_offset:,} bytes ({prev_lines:,} {t('줄', 'lines')})")
+                print(f"  {t('새 데이터', 'New data'):<13}: {new_bytes / (1024**2):.1f} MB")
     else:
         if args.full and cp:
-            print(f"\n  --full: 체크포인트를 무시하고 전체 재분석합니다.")
+            print(t("\n  --full: 체크포인트를 무시하고 전체 재분석합니다.", "\n  --full: Ignoring checkpoint, performing full re-analysis."))
             clear_checkpoint(args.logfile)
 
     # --- 분석 대상 크기 ---
     analyze_bytes = file_size - start_offset
 
-    print(f"\n  로그 파일: {args.logfile}")
-    print(f"  전체 크기: {file_size / (1024**3):.2f} GB")
+    print(f"\n  {t('로그 파일', 'Log file')}: {args.logfile}")
+    print(f"  {t('전체 크기', 'Total size')}: {file_size / (1024**3):.2f} GB")
     if incremental:
-        print(f"  분석 범위: {start_offset:,} ~ {file_size:,} bytes ({analyze_bytes / (1024**2):.1f} MB)")
-    print(f"  분석 단위: {format_interval(interval_sec)}")
+        print(f"  {t('분석 범위', 'Analysis range')}: {start_offset:,} ~ {file_size:,} bytes ({analyze_bytes / (1024**2):.1f} MB)")
+    print(f"  {t('분석 단위', 'Interval')}: {format_interval(interval_sec)}")
     if args.node:
-        print(f"  노드 필터: {args.node}")
+        print(f"  {t('노드 필터', 'Node filter')}: {args.node}")
     if args.errors_only:
-        print(f"  모드: ERROR/WARN/FATAL만 분석")
+        print(t("  모드: ERROR/WARN/FATAL만 분석", "  Mode: ERROR/WARN/FATAL only"))
     if ts_from is not None or ts_to is not None:
-        from_str = datetime.fromtimestamp(ts_from).strftime('%Y-%m-%d %H:%M:%S') if ts_from else '(처음)'
-        to_str = datetime.fromtimestamp(ts_to).strftime('%Y-%m-%d %H:%M:%S') if ts_to else '(끝)'
-        print(f"  시간 범위: {from_str} ~ {to_str}")
+        from_str = datetime.fromtimestamp(ts_from).strftime('%Y-%m-%d %H:%M:%S') if ts_from else t('(처음)', '(start)')
+        to_str = datetime.fromtimestamp(ts_to).strftime('%Y-%m-%d %H:%M:%S') if ts_to else t('(끝)', '(end)')
+        print(f"  {t('시간 범위', 'Time range')}: {from_str} ~ {to_str}")
     print()
 
     start_time = time.time()
@@ -2110,21 +2125,21 @@ def main():
                     eta = remaining / (bytes_read / elapsed) if bytes_read > 0 and elapsed > 0 else 0
                     eta_min = int(eta // 60)
                     eta_sec = int(eta % 60)
-                    mode_tag = "[증분] " if incremental else ""
+                    mode_tag = t("[증분] ", "[INCR] ") if incremental else ""
                     sys.stderr.write(
-                        f"\r  {mode_tag}진행: {progress:>3}%  |  "
-                        f"{analyzer.total_lines:>12,} 줄  |  "
+                        f"\r  {mode_tag}{t('진행', 'Progress')}: {progress:>3}%  |  "
+                        f"{analyzer.total_lines:>12,} {t('줄', 'lines')}  |  "
                         f"{speed:>6.1f} MB/s  |  "
-                        f"남은 시간: {eta_min}분 {eta_sec}초   "
+                        f"{t('남은 시간', 'ETA')}: {eta_min}{t('분', 'm')} {eta_sec}{t('초', 's')}   "
                     )
                     sys.stderr.flush()
 
     except KeyboardInterrupt:
-        print(f"\n\n  [중단됨] {analyzer.total_lines:,} 줄까지 분석된 결과를 표시합니다.\n")
+        print(f"\n\n  {t('[중단됨]', '[Interrupted]')} {t(f'{analyzer.total_lines:,} 줄까지 분석된 결과를 표시합니다.', f'Showing results for {analyzer.total_lines:,} lines analyzed.')}\n")
 
     elapsed = time.time() - start_time
-    mode_tag = "[증분] " if incremental else ""
-    sys.stderr.write(f"\r  {mode_tag}완료: {analyzer.total_lines:,} 줄 처리 ({elapsed:.1f}초)\n\n")
+    mode_tag = t("[증분] ", "[INCR] ") if incremental else ""
+    sys.stderr.write(f"\r  {mode_tag}{t('완료', 'Done')}: {analyzer.total_lines:,} {t('줄 처리', 'lines processed')} ({elapsed:.1f}{t('초', 's')})\n\n")
     sys.stderr.flush()
 
     analyzer.print_report(top_nodes=args.top_nodes)
@@ -2135,7 +2150,7 @@ def main():
     if incremental and cp:
         cumulative_lines += cp.get('total_lines', 0)
     save_checkpoint(args.logfile, final_offset, cumulative_lines, last_ts, file_size)
-    print(f"  체크포인트 저장 완료 (offset: {final_offset:,} bytes, {cumulative_lines:,} 줄)")
+    print(f"  {t('체크포인트 저장 완료', 'Checkpoint saved')} (offset: {final_offset:,} bytes, {cumulative_lines:,} {t('줄', 'lines')})")
 
     # CSV 보고서 자동 생성 (실행 날짜 기준)
     report_dir = _get_report_dir()
@@ -2152,5 +2167,5 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        print("\n취소됨")
+        print(f"\n{t('취소됨', 'Cancelled')}")
         raise SystemExit(130)

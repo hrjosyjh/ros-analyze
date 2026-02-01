@@ -19,6 +19,7 @@ from datetime import datetime
 from collections import defaultdict, Counter
 
 from log_parser import parse_datetime_arg
+from i18n import set_lang, t
 
 # ==============================================================================
 #  Log Parsing Logic
@@ -120,9 +121,9 @@ class NodeStats:
 
 def print_global_summary(nodes, errors_only=False):
     print(f"\n{'='*90}")
-    print(f" ROS 2 System Analysis Report")
+    print(f" {t('ROS 2 시스템 분석 보고서', 'ROS 2 System Analysis Report')}")
     print(f"{'='*90}")
-    print(f" {'Node Name':<40} | {'Total':>8} | {'Errors':>6} | {'Warn':>6} | {'FPS':>5} | {'Duration'}")
+    print(f" {t('노드명', 'Node Name'):<40} | {t('합계', 'Total'):>8} | {t('에러', 'Errors'):>6} | {t('경고', 'Warn'):>6} | {'FPS':>5} | {t('기간', 'Duration')}")
     print(f"{'-'*90}")
 
     # Sort by error count (descending) then total count
@@ -149,28 +150,28 @@ def print_global_summary(nodes, errors_only=False):
 
 def print_node_detail(node_stats):
     if not node_stats:
-        print("Node not found.")
+        print(t("노드를 찾을 수 없습니다.", "Node not found."))
         return
 
     n = node_stats
     duration = n.get_duration()
-    
+
     print(f"\n{'='*80}")
-    print(f" Detailed Analysis: {n.name}")
+    print(f" {t('상세 분석', 'Detailed Analysis')}: {n.name}")
     print(f"{'='*80}")
-    print(f" - Total Logs: {n.count:,}")
-    print(f" - First Log : {datetime.fromtimestamp(n.first_ts).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f" - Last Log  : {datetime.fromtimestamp(n.last_ts).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f" - Duration  : {duration:.2f} seconds")
-    print(f" - Log Rate  : {n.count / duration:.1f} lines/sec" if duration > 0 else " - Log Rate : N/A")
-    
-    print(f"\n [Log Level Distribution]")
+    print(f" - {t('총 로그 수', 'Total Logs')}: {n.count:,}")
+    print(f" - {t('첫 로그', 'First Log')} : {datetime.fromtimestamp(n.first_ts).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" - {t('마지막 로그', 'Last Log')}  : {datetime.fromtimestamp(n.last_ts).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" - {t('기간', 'Duration')}  : {duration:.2f} {t('초', 'seconds')}")
+    print(f" - {t('로그 처리율', 'Log Rate')}  : {n.count / duration:.1f} lines/sec" if duration > 0 else f" - {t('로그 처리율', 'Log Rate')} : N/A")
+
+    print(f"\n [{t('로그 레벨 분포', 'Log Level Distribution')}]")
     for level, count in n.levels.items():
         bar = "█" * int((count / n.count) * 50)
         print(f"   {level:<5} : {count:>6,} {bar}")
 
     # Timeline visualization
-    print(f"\n [Activity Timeline (Logs per Minute)]")
+    print(f"\n [{t('활동 타임라인 (분당 로그 수)', 'Activity Timeline (Logs per Minute)')}]")
     if n.activity_timeline:
         min_bucket = min(n.activity_timeline.keys())
         max_bucket = max(n.activity_timeline.keys())
@@ -189,19 +190,19 @@ def print_node_detail(node_stats):
     # Error Analysis
     err_count = n.levels['ERROR'] + n.levels['FATAL'] + n.levels['WARN']
     if err_count > 0:
-        print(f"\n [Top Error/Warning Patterns]")
-        
+        print(f"\n [{t('상위 에러/경고 패턴', 'Top Error/Warning Patterns')}]")
+
         # Group by "cleaned" message
         patterns = Counter([x[3] for x in n.error_samples])
-        
+
         for clean_msg, count in patterns.most_common(5):
             # Find original message for this pattern
             example = next(x[2] for x in n.error_samples if x[3] == clean_msg)
-            print(f"   ({count} occurrences)")
+            print(f"   ({count} {t('회 발생', 'occurrences')})")
             print(f"   └── {example[:120]}...")
             print()
     else:
-        print("\n ✅ No Errors or Warnings detected.")
+        print(t("\n ✅ 에러 또는 경고가 없습니다.", "\n ✅ No Errors or Warnings detected."))
     print("\n")
 
 
@@ -215,11 +216,14 @@ def main():
     parser.add_argument("--node", help="Specific node name to analyze (substring match)")
     parser.add_argument("--errors-only", action="store_true", help="Only show nodes with errors in summary")
     parser.add_argument('--from', dest='time_from', default=None,
-                        help='분석 시작 시각 (예: "2026-01-27", "2026-01-27 09:00", "09:00")')
+                        help='Start time / 분석 시작 시각 (e.g. "2026-01-27", "2026-01-27 09:00", "09:00")')
     parser.add_argument('--to', dest='time_to', default=None,
-                        help='분석 종료 시각 (예: "2026-01-28", "2026-01-27 18:00", "18:00")')
+                        help='End time / 분석 종료 시각 (e.g. "2026-01-28", "2026-01-27 18:00", "18:00")')
+    parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='ko',
+                        help='Output language / 출력 언어 (ko: 한국어, en: English) [default: ko]')
 
     args = parser.parse_args()
+    set_lang(args.lang)
 
     # 시간 범위 파싱
     ts_from = None
@@ -238,11 +242,11 @@ def main():
     nodes = {}
     total_lines = 0
 
-    print(f"Analyzing {args.logfile}...")
+    print(t(f"{args.logfile} 분석 중...", f"Analyzing {args.logfile}..."))
     if ts_from is not None or ts_to is not None:
-        from_str = datetime.fromtimestamp(ts_from).strftime('%Y-%m-%d %H:%M:%S') if ts_from else '(처음)'
-        to_str = datetime.fromtimestamp(ts_to).strftime('%Y-%m-%d %H:%M:%S') if ts_to else '(끝)'
-        print(f"  시간 범위: {from_str} ~ {to_str}")
+        from_str = datetime.fromtimestamp(ts_from).strftime('%Y-%m-%d %H:%M:%S') if ts_from else t('(처음)', '(start)')
+        to_str = datetime.fromtimestamp(ts_to).strftime('%Y-%m-%d %H:%M:%S') if ts_to else t('(끝)', '(end)')
+        print(f"  {t('시간 범위', 'Time range')}: {from_str} ~ {to_str}")
 
     try:
         with open(args.logfile, 'r', encoding='utf-8', errors='replace') as f:
@@ -263,22 +267,22 @@ def main():
                         nodes[node_name] = NodeStats(node_name)
 
                     nodes[node_name].add(ts, level, msg)
-                
+
                 if total_lines % 100000 == 0:
-                    sys.stdout.write(f"\rProcessed {total_lines:,} lines...")
+                    sys.stdout.write(f"\r{t('처리 중', 'Processed')} {total_lines:,} {t('줄...', 'lines...')}")
                     sys.stdout.flush()
 
     except FileNotFoundError:
-        print(f"Error: File '{args.logfile}' not found.")
+        print(t(f"에러: '{args.logfile}' 파일을 찾을 수 없습니다.", f"Error: File '{args.logfile}' not found."))
         sys.exit(1)
 
-    print(f"\rProcessed {total_lines:,} lines. Complete.      ")
+    print(f"\r{t('처리 완료', 'Processed')} {total_lines:,} {t('줄. 완료.', 'lines. Complete.')}      ")
 
     if args.node:
         # Find partial matches
         matched = [n for n in nodes.values() if args.node in n.name]
         if not matched:
-            print(f"No nodes matching '{args.node}' found.")
+            print(t(f"'{args.node}'에 매칭되는 노드가 없습니다.", f"No nodes matching '{args.node}' found."))
         else:
             for n in matched:
                 print_node_detail(n)
