@@ -49,6 +49,106 @@ COLOR_TO_LEVEL = {
 }
 
 
+# =============================================================================
+#  Communication content extraction (--comm mode)
+# =============================================================================
+
+RE_TOPIC = re.compile(r'(/[a-zA-Z_][a-zA-Z0-9_/]*)')
+RE_KV_PAIR = re.compile(r'([a-zA-Z_]\w*)\s*[=:]\s*(-?[\d]+(?:\.[\d]+)?)')
+RE_COMM_PUBLISH = re.compile(r'\b(?:publish(?:ing|ed)?|sending|sent)\b', re.IGNORECASE)
+RE_COMM_SUBSCRIBE = re.compile(r'\b(?:subscrib(?:ing|ed|e)?|receiv(?:ing|ed|e)?|waiting)\b', re.IGNORECASE)
+RE_COMM_ERROR = re.compile(
+    r'\b(?:no\s+subscribers?|timeout|failed\s+to\s+(?:publish|subscribe|send|receive))\b',
+    re.IGNORECASE,
+)
+COMM_KEYWORDS = frozenset({
+    'publishing', 'published', 'publish',
+    'subscribing', 'subscribed', 'subscribe',
+    'received', 'receiving', 'receive',
+    'sending', 'sent', 'send',
+    'waiting', 'timeout', 'no subscribers',
+})
+
+
+def parse_line_full(line: str) -> Optional[Tuple[float, str, str, str]]:
+    """Parse a log line into (timestamp, node, level, message); returns None on failure.
+
+    Unlike parse_line(), this also extracts the cleaned message portion after the
+    node/level prefix.  Only called in --comm mode to avoid hot-path overhead.
+    """
+
+    # Pattern 1: launch logs  "TS [LEVEL] [node]: msg"
+    m = RE_LAUNCH.match(line)
+    if m:
+        ts = float(m.group(1))
+        level = m.group(2)
+        node = m.group(3).rstrip(':')
+        msg = RE_ANSI.sub('', line[m.end():]).strip()
+        return ts, node, level, msg
+
+    # Pattern 2: ROS2 logging  "TS [node] [LEVEL] ... : msg"
+    m = RE_ROS2LOG.match(line)
+    if m:
+        ts = float(m.group(1))
+        node = m.group(2)
+        level = m.group(3)
+        msg = RE_ANSI.sub('', line[m.end():]).strip()
+        return ts, node, level, msg
+
+    # Pattern 3: node direct output
+    m = RE_NODE_DIRECT.match(line)
+    if m:
+        ts = float(m.group(1))
+        node = m.group(2)
+        cm = RE_COLOR_LEVEL.search(line)
+        if cm:
+            level = COLOR_TO_LEVEL.get(cm.group(1), 'INFO')
+        else:
+            level = 'INFO'
+        msg = RE_ANSI.sub('', line[m.end():]).strip()
+        return ts, node, level, msg
+
+    return None
+
+
+def extract_comm_content(msg: str):
+    """Extract communication content from a log message.
+
+    Returns dict with keys 'topics', 'action', 'kv_pairs' or None if the
+    message does not look like a communication line.
+    """
+    # Cheap pre-check: must contain a topic-like path or a comm keyword
+    msg_lower = msg.lower()
+    has_topic = '/' in msg
+    has_keyword = any(kw in msg_lower for kw in COMM_KEYWORDS)
+    if not has_topic and not has_keyword:
+        return None
+
+    topics = RE_TOPIC.findall(msg)
+    if not topics and not has_keyword:
+        return None
+
+    # Determine action
+    action = None
+    if RE_COMM_ERROR.search(msg):
+        action = 'error'
+    elif RE_COMM_PUBLISH.search(msg):
+        action = 'publish'
+    elif RE_COMM_SUBSCRIBE.search(msg):
+        action = 'subscribe'
+
+    if not topics and action is None:
+        return None
+
+    kv_pairs = RE_KV_PAIR.findall(msg)
+
+    return {
+        'topics': topics,
+        'action': action,
+        'kv_pairs': [(k, float(v)) for k, v in kv_pairs],
+    }
+
+
 def parse_line(line: str) -> Optional[Tuple[float, str, str]]:
     """Parse a log line into (timestamp, node, level); returns None on failure."""
 

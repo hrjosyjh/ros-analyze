@@ -40,7 +40,10 @@ import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
-from log_parser import RE_ANSI, bucket_key, bucket_label, parse_datetime_arg, parse_interval, parse_line
+from log_parser import (
+    RE_ANSI, bucket_key, bucket_label, parse_datetime_arg, parse_interval,
+    parse_line, parse_line_full, extract_comm_content,
+)
 from i18n import set_lang, t
 
 
@@ -176,7 +179,8 @@ class LogAnalyzer:
         if level in ('ERROR', 'WARN', 'FATAL') and len(self.error_messages) < self.max_error_msgs:
             dt_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
             clean_msg = RE_ANSI.sub('', line.strip())
-            self.error_messages.append((dt_str, node, level, clean_msg[:200]))
+            msg_part = _extract_msg_part(clean_msg, node, max_len=200)
+            self.error_messages.append((dt_str, node, level, msg_part))
 
     def print_report(self, top_nodes=5):
         if self.parsed_lines == 0:
@@ -538,6 +542,326 @@ def format_interval(sec):
 
 
 # =============================================================================
+#  통신 데이터 분석 (--comm 모드)
+# =============================================================================
+
+class CommAnalyzer:
+    """Node communication content analyzer for --comm mode."""
+
+    MAX_TOPICS_PER_NODE = 200
+    MAX_ANOMALIES = 200
+    MAX_VALUE_TREND = 500
+
+    def __init__(self, interval_sec, node_filter=None, errors_only=False,
+                 ts_from=None, ts_to=None,
+                 track_topics=None, track_values=None, gap_threshold=10.0):
+        self.interval_sec = interval_sec
+        self.node_filter = node_filter
+        self.errors_only = errors_only
+        self.ts_from = ts_from
+        self.ts_to = ts_to
+        self.track_topics = track_topics or []  # partial-match topic filters
+        self.track_values = set(track_values or [])  # key names to track
+        self.gap_threshold = gap_threshold
+
+        # Counters
+        self.total_lines = 0
+        self.comm_lines = 0
+
+        # node -> set of topics (bounded per node)
+        self.node_topics = defaultdict(set)
+        # topic -> {count, publish, subscribe, error}
+        self.topic_stats = defaultdict(lambda: {'count': 0, 'publish': 0, 'subscribe': 0, 'error': 0})
+        # node -> topic -> action -> count
+        self.node_topic_action = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        # bucket -> topic -> count
+        self.bucket_topic_counts = defaultdict(lambda: defaultdict(int))
+        # (topic, key) -> {count, sum, min, max}
+        self.kv_summary = {}
+        # (topic, key) -> deque of (ts, value)
+        self.value_trends = {}
+        # anomalies deque
+        self.anomalies = deque(maxlen=self.MAX_ANOMALIES)
+        # topic -> last timestamp (for gap detection)
+        self._topic_last_ts = {}
+
+        # Time range
+        self.ts_min = float('inf')
+        self.ts_max = float('-inf')
+
+    def _matches_track_topic(self, topic):
+        """Check if topic matches any --track-topic filter (partial match)."""
+        if not self.track_topics:
+            return True
+        return any(t_filter in topic for t_filter in self.track_topics)
+
+    def process_line(self, line):
+        self.total_lines += 1
+
+        result = parse_line_full(line)
+        if result is None:
+            return
+
+        ts, node, level, msg = result
+
+        # Time range filter
+        if self.ts_from is not None and ts < self.ts_from:
+            return
+        if self.ts_to is not None and ts > self.ts_to:
+            return
+
+        # Node filter
+        if self.node_filter and self.node_filter not in node:
+            return
+        if self.errors_only and level not in ('ERROR', 'WARN', 'FATAL'):
+            return
+
+        # Extract communication content
+        comm = extract_comm_content(msg)
+        if comm is None:
+            return
+
+        self.comm_lines += 1
+
+        # Update time range
+        if ts < self.ts_min:
+            self.ts_min = ts
+        if ts > self.ts_max:
+            self.ts_max = ts
+
+        topics = comm['topics']
+        action = comm['action']
+        kv_pairs = comm['kv_pairs']
+
+        bk = bucket_key(ts, self.interval_sec)
+
+        for topic in topics:
+            # Bounded node-topic mapping
+            node_set = self.node_topics[node]
+            if len(node_set) < self.MAX_TOPICS_PER_NODE:
+                node_set.add(topic)
+
+            # Topic stats
+            stats = self.topic_stats[topic]
+            stats['count'] += 1
+            if action:
+                stats[action] += 1
+
+            # Node-topic-action
+            self.node_topic_action[node][topic][action or 'unknown'] += 1
+
+            # Bucket topic counts
+            self.bucket_topic_counts[bk][topic] += 1
+
+            # Gap detection
+            if topic in self._topic_last_ts:
+                gap = ts - self._topic_last_ts[topic]
+                if gap > self.gap_threshold:
+                    self.anomalies.append({
+                        'type': 'gap',
+                        'ts': ts,
+                        'node': node,
+                        'topic': topic,
+                        'detail': f'{gap:.1f}s gap (threshold: {self.gap_threshold}s)',
+                    })
+            self._topic_last_ts[topic] = ts
+
+            # KV summary + value trends
+            for key, val in kv_pairs:
+                kv_key = (topic, key)
+                if kv_key not in self.kv_summary:
+                    self.kv_summary[kv_key] = {'count': 0, 'sum': 0.0, 'min': val, 'max': val}
+                s = self.kv_summary[kv_key]
+                s['count'] += 1
+                s['sum'] += val
+                if val < s['min']:
+                    s['min'] = val
+                if val > s['max']:
+                    s['max'] = val
+
+                # Value trends for tracked keys
+                if key in self.track_values:
+                    if kv_key not in self.value_trends:
+                        self.value_trends[kv_key] = deque(maxlen=self.MAX_VALUE_TREND)
+                    self.value_trends[kv_key].append((ts, val))
+
+        # Error action anomaly
+        if action == 'error':
+            self.anomalies.append({
+                'type': 'comm_error',
+                'ts': ts,
+                'node': node,
+                'topic': topics[0] if topics else '(unknown)',
+                'detail': msg[:150],
+            })
+
+    def print_report(self):
+        if self.comm_lines == 0:
+            print(t("  통신 관련 로그 라인이 없습니다.", "  No communication-related log lines found."))
+            print()
+            return
+
+        # --- Section 1: Communication Summary ---
+        print("-" * 90)
+        print(f"  [{t('통신 분석 요약', 'Communication Analysis Summary')}]")
+        print("-" * 90)
+        unique_pairs = sum(len(topics) for topics in self.node_topics.values())
+        print(f"  {t('통신 라인 수', 'Comm lines'):<20}: {self.comm_lines:>12,}")
+        print(f"  {t('고유 토픽 수', 'Unique topics'):<20}: {len(self.topic_stats):>12,}")
+        print(f"  {t('고유 노드-토픽 쌍', 'Node-topic pairs'):<20}: {unique_pairs:>12,}")
+        if self.ts_min != float('inf'):
+            print(f"  {t('시간 범위', 'Time range'):<20}: {datetime.fromtimestamp(self.ts_min).strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"  {'':20}  ~ {datetime.fromtimestamp(self.ts_max).strftime('%Y-%m-%d %H:%M:%S')}")
+        print()
+
+        # --- Section 2: Topic Statistics ---
+        print("-" * 90)
+        print(f"  [{t('토픽별 통계', 'Topic Statistics')}]")
+        print("-" * 90)
+        sorted_topics = sorted(self.topic_stats.items(), key=lambda x: -x[1]['count'])
+        max_topic_count = sorted_topics[0][1]['count'] if sorted_topics else 1
+        header = f"  {'Topic':<40} {t('합계','Total'):>8} {'Pub':>8} {'Sub':>8} {'Err':>6}"
+        print(header)
+        print("  " + "-" * 76)
+        for topic, stats in sorted_topics[:30]:
+            bar_len = int(stats['count'] / max_topic_count * 20)
+            bar = "█" * bar_len
+            print(f"  {topic:<40} {stats['count']:>8,} {stats['publish']:>8,} {stats['subscribe']:>8,} {stats['error']:>6,}  {bar}")
+        if len(sorted_topics) > 30:
+            print(f"  ... {t(f'외 {len(sorted_topics) - 30}개 토픽', f'and {len(sorted_topics) - 30} more topics')}")
+        print()
+
+        # --- Section 3: Node-Topic Mapping ---
+        print("-" * 90)
+        print(f"  [{t('노드-토픽 매핑', 'Node-Topic Mapping')}]")
+        print("-" * 90)
+        sorted_nodes = sorted(self.node_topic_action.keys())
+        for node in sorted_nodes[:20]:
+            topics_map = self.node_topic_action[node]
+            total_for_node = sum(
+                sum(acts.values()) for acts in topics_map.values()
+            )
+            print(f"  {node} ({total_for_node:,} {t('건', 'msgs')})")
+            sorted_node_topics = sorted(topics_map.items(),
+                                        key=lambda x: -sum(x[1].values()))
+            for topic, acts in sorted_node_topics[:10]:
+                act_parts = []
+                for a in ('publish', 'subscribe', 'error', 'unknown'):
+                    cnt = acts.get(a, 0)
+                    if cnt > 0:
+                        act_parts.append(f"{a}:{cnt:,}")
+                print(f"    {topic:<36} {', '.join(act_parts)}")
+            if len(sorted_node_topics) > 10:
+                print(f"    ... {t(f'외 {len(sorted_node_topics) - 10}개 토픽', f'and {len(sorted_node_topics) - 10} more topics')}")
+            print()
+
+        # --- Section 4: Topic Activity by Time ---
+        if self.bucket_topic_counts:
+            print("-" * 90)
+            print(f"  [{t('시간대별 토픽 활동', 'Topic Activity by Time')}]")
+            print("-" * 90)
+            sorted_bks = sorted(self.bucket_topic_counts.keys())
+            for bk in sorted_bks:
+                label = bucket_label(bk, self.interval_sec)
+                topic_counts = self.bucket_topic_counts[bk]
+                top5 = sorted(topic_counts.items(), key=lambda x: -x[1])[:5]
+                total_bk = sum(topic_counts.values())
+                top_str = ", ".join(f"{t_name}({c:,})" for t_name, c in top5)
+                print(f"  {label}  {total_bk:>8,}  {top_str}")
+            print()
+
+        # --- Section 5: Key-Value Data Summary ---
+        if self.kv_summary:
+            print("-" * 90)
+            print(f"  [{t('키-값 데이터 요약', 'Key-Value Data Summary')}]")
+            print("-" * 90)
+            header = f"  {'Topic':<30} {'Key':<15} {t('횟수','Count'):>8} {'Avg':>10} {'Min':>10} {'Max':>10}"
+            print(header)
+            print("  " + "-" * 88)
+            sorted_kv = sorted(self.kv_summary.items(), key=lambda x: -x[1]['count'])
+            for (topic, key), s in sorted_kv[:40]:
+                avg = s['sum'] / s['count'] if s['count'] > 0 else 0
+                print(f"  {topic:<30} {key:<15} {s['count']:>8,} {avg:>10.3f} {s['min']:>10.3f} {s['max']:>10.3f}")
+            if len(sorted_kv) > 40:
+                print(f"  ... {t(f'외 {len(sorted_kv) - 40}개 항목', f'and {len(sorted_kv) - 40} more entries')}")
+            print()
+
+        # --- Section 6: Value Trends ---
+        if self.value_trends:
+            print("-" * 90)
+            print(f"  [{t('값 변화 추적', 'Value Change Tracking')}]")
+            print("-" * 90)
+            for (topic, key), trend in sorted(self.value_trends.items()):
+                if not trend:
+                    continue
+                vals = [v for _, v in trend]
+                print(f"  {topic} / {key}  ({len(trend)} {t('샘플', 'samples')})")
+                print(f"    {t('최근 10개', 'Last 10')}: {', '.join(f'{v:.3f}' for v in vals[-10:])}")
+                # Simple trend indicator
+                if len(vals) >= 2:
+                    first_half = sum(vals[:len(vals)//2]) / max(1, len(vals)//2)
+                    second_half = sum(vals[len(vals)//2:]) / max(1, len(vals) - len(vals)//2)
+                    if second_half > first_half * 1.1:
+                        trend_str = t('↑ 상승 추세', '↑ increasing')
+                    elif second_half < first_half * 0.9:
+                        trend_str = t('↓ 하락 추세', '↓ decreasing')
+                    else:
+                        trend_str = t('→ 안정', '→ stable')
+                    print(f"    {t('추세', 'Trend')}: {trend_str}")
+                print()
+
+        # --- Section 7: Communication Anomalies ---
+        if self.anomalies:
+            print("-" * 90)
+            print(f"  [{t('통신 이상', 'Communication Anomalies')}]  ({len(self.anomalies)} {t('건', 'events')})")
+            print("-" * 90)
+            for anom in list(self.anomalies)[-30:]:
+                dt_str = datetime.fromtimestamp(anom['ts']).strftime('%Y-%m-%d %H:%M:%S')
+                print(f"  [{anom['type']:<12}] {dt_str}  {anom['node']:<30} {anom['topic']}")
+                print(f"    {anom['detail'][:120]}")
+            print()
+
+    def export_csv_sections(self, writer):
+        """Write comm analysis sections to an existing CSV writer."""
+        if self.comm_lines == 0:
+            return
+
+        # Section: Topic Statistics
+        writer.writerow([])
+        writer.writerow([t('[토픽 통계]', '[Topic Statistics]')])
+        writer.writerow(['topic', 'count', 'publish', 'subscribe', 'error'])
+        for topic, stats in sorted(self.topic_stats.items(), key=lambda x: -x[1]['count']):
+            writer.writerow([topic, stats['count'], stats['publish'], stats['subscribe'], stats['error']])
+
+        # Section: Node-Topic Mapping
+        writer.writerow([])
+        writer.writerow([t('[노드-토픽 매핑]', '[Node-Topic Mapping]')])
+        writer.writerow(['node', 'topic', 'action', 'count'])
+        for node in sorted(self.node_topic_action.keys()):
+            for topic in sorted(self.node_topic_action[node].keys()):
+                for action, cnt in sorted(self.node_topic_action[node][topic].items(), key=lambda x: -x[1]):
+                    writer.writerow([node, topic, action, cnt])
+
+        # Section: KV Summary
+        if self.kv_summary:
+            writer.writerow([])
+            writer.writerow([t('[키-값 요약]', '[Key-Value Summary]')])
+            writer.writerow(['topic', 'key', 'count', 'avg', 'min', 'max'])
+            for (topic, key), s in sorted(self.kv_summary.items(), key=lambda x: -x[1]['count']):
+                avg = s['sum'] / s['count'] if s['count'] > 0 else 0
+                writer.writerow([topic, key, s['count'], f"{avg:.6f}", f"{s['min']:.6f}", f"{s['max']:.6f}"])
+
+        # Section: Anomalies
+        if self.anomalies:
+            writer.writerow([])
+            writer.writerow([t('[통신 이상]', '[Communication Anomalies]')])
+            writer.writerow(['type', 'timestamp', 'node', 'topic', 'detail'])
+            for anom in self.anomalies:
+                dt_str = datetime.fromtimestamp(anom['ts']).strftime('%Y-%m-%d %H:%M:%S')
+                writer.writerow([anom['type'], dt_str, anom['node'], anom['topic'], anom['detail']])
+
+
+# =============================================================================
 #  체크포인트 (증분 분석)
 # =============================================================================
 
@@ -726,7 +1050,8 @@ def get_terminal_size():
 class LiveMonitor:
     """실시간 로그 모니터링 대시보드"""
 
-    def __init__(self, interval_sec, window_sec, node_filter=None, errors_only=False, focus_query=None):
+    def __init__(self, interval_sec, window_sec, node_filter=None, errors_only=False, focus_query=None,
+                 comm_mode=False, track_topics=None, track_values=None, gap_threshold=10.0):
         self.interval_sec = interval_sec
         self.window_sec = window_sec
         self.node_filter = node_filter
@@ -763,6 +1088,19 @@ class LiveMonitor:
         self.start_wall = time.time()
         self.start_ts = None
         self.latest_ts = None
+
+        # Communication mode fields
+        self.comm_mode = comm_mode
+        if comm_mode:
+            self.comm_track_topics = track_topics or []
+            self.comm_track_values = set(track_values or [])
+            self.comm_gap_threshold = gap_threshold
+            self.comm_events = deque()  # (ts, node, topic, action) rolling window
+            self.comm_topic_counts = defaultdict(int)  # cumulative topic counts
+            self.comm_node_topics = defaultdict(set)  # node -> set of topics (max 200/node)
+            self.comm_recent_values = {}  # (topic,key) -> deque of (ts, val), maxlen=20
+            self.comm_anomalies = deque(maxlen=10)
+            self._comm_topic_last_ts = {}
 
     def process_line(self, line):
         self.total_lines += 1
@@ -845,6 +1183,52 @@ class LiveMonitor:
             self.recent_alerts.append((dt_str, node, level, msg_part[:120]))
             if is_focus:
                 self.focus_recent_alerts.append((dt_str, node, level, msg_part[:120]))
+
+        # Communication mode processing
+        if self.comm_mode:
+            full = parse_line_full(line)
+            if full is not None:
+                _, _, _, msg = full
+                comm = extract_comm_content(msg)
+                if comm is not None:
+                    topics = comm['topics']
+                    action = comm['action']
+                    kv_pairs = comm['kv_pairs']
+                    for topic in topics:
+                        self.comm_events.append((ts, node, topic, action))
+                        self.comm_topic_counts[topic] += 1
+                        node_set = self.comm_node_topics[node]
+                        if len(node_set) < 200:
+                            node_set.add(topic)
+
+                        # Gap detection
+                        if topic in self._comm_topic_last_ts:
+                            gap = ts - self._comm_topic_last_ts[topic]
+                            if gap > self.comm_gap_threshold:
+                                self.comm_anomalies.append((
+                                    ts, 'gap', node, topic,
+                                    f'{gap:.1f}s gap',
+                                ))
+                        self._comm_topic_last_ts[topic] = ts
+
+                        # KV tracking
+                        for key, val in kv_pairs:
+                            if key in self.comm_track_values:
+                                kv_key = (topic, key)
+                                if kv_key not in self.comm_recent_values:
+                                    self.comm_recent_values[kv_key] = deque(maxlen=20)
+                                self.comm_recent_values[kv_key].append((ts, val))
+
+                    if action == 'error':
+                        self.comm_anomalies.append((
+                            ts, 'comm_error', node,
+                            topics[0] if topics else '(unknown)',
+                            msg[:100],
+                        ))
+
+                    # Expire old comm events from window
+                    while self.comm_events and self.comm_events[0][0] < cutoff:
+                        self.comm_events.popleft()
 
         return (ts, node, level)
 
@@ -1048,6 +1432,63 @@ class LiveMonitor:
                 truncated = msg[:max_msg_len] + "…" if len(msg) > max_msg_len else msg
                 lines.append(f"  {TERM_DIM}{dt_str}{TERM_RESET} {color}[{level}]{TERM_RESET} {TERM_BOLD}{node}{TERM_RESET} {truncated}")
 
+        # --- 통신 흐름 섹션 (comm_mode) ---
+        if self.comm_mode and self.comm_events:
+            lines.append(f"  {TERM_BOLD}{t('[통신 흐름]', '[Communication Flow]')}{TERM_RESET}  ({len(self.comm_events):,} {t('건 (윈도우)', 'in window')})")
+            lines.append(f"  {'─' * (w - 4)}")
+
+            # Top 5 node->topic flows in window
+            flow_counts = defaultdict(int)
+            win_topic_counts = defaultdict(lambda: defaultdict(int))
+            for _, nd, tp, act in self.comm_events:
+                flow_counts[(nd, tp)] += 1
+                win_topic_counts[tp][act or 'unknown'] += 1
+
+            top_flows = sorted(flow_counts.items(), key=lambda x: -x[1])[:5]
+            for (nd, tp), cnt in top_flows:
+                lines.append(f"  {nd:<30} → {tp:<25} {cnt:>6,}")
+
+            lines.append("")
+
+            # Top 5 topics with action ratio
+            lines.append(f"  {TERM_BOLD}{t('[토픽 활동]', '[Topic Activity]')}{TERM_RESET}")
+            lines.append(f"  {'─' * (w - 4)}")
+            sorted_win_topics = sorted(win_topic_counts.items(),
+                                       key=lambda x: -sum(x[1].values()))[:5]
+            for tp, acts in sorted_win_topics:
+                total_tp = sum(acts.values())
+                act_strs = []
+                for a in ('publish', 'subscribe', 'error', 'unknown'):
+                    c = acts.get(a, 0)
+                    if c > 0:
+                        if a == 'error':
+                            act_strs.append(f"{TERM_RED}{a}:{c}{TERM_RESET}")
+                        else:
+                            act_strs.append(f"{a}:{c}")
+                lines.append(f"  {tp:<40} {total_tp:>6,}  {', '.join(act_strs)}")
+            lines.append("")
+
+            # Tracked values
+            if self.comm_recent_values:
+                lines.append(f"  {TERM_BOLD}{t('[추적 값]', '[Tracked Values]')}{TERM_RESET}")
+                lines.append(f"  {'─' * (w - 4)}")
+                for (tp, key), vals in sorted(self.comm_recent_values.items()):
+                    if not vals:
+                        continue
+                    recent = list(vals)[-5:]
+                    val_str = ", ".join(f"{v:.3f}" for _, v in recent)
+                    lines.append(f"  {tp}/{key}: {val_str}")
+                lines.append("")
+
+            # Anomalies
+            if self.comm_anomalies:
+                lines.append(f"  {TERM_BOLD}{TERM_RED}{t('[통신 이상]', '[Comm Anomalies]')}{TERM_RESET}")
+                recent_anoms = list(self.comm_anomalies)[-3:]
+                for ts_a, atype, nd, tp, detail in recent_anoms:
+                    dt_a = datetime.fromtimestamp(ts_a).strftime('%H:%M:%S')
+                    lines.append(f"  {TERM_RED}{dt_a} [{atype}]{TERM_RESET} {nd} {tp} {detail[:60]}")
+                lines.append("")
+
         # --- 푸터 ---
         lines.append("")
         lines.append(f"{TERM_DIM}{'─' * w}{TERM_RESET}")
@@ -1095,6 +1536,10 @@ def run_follow_mode(args, interval_sec, window_sec):
         node_filter=args.node,
         errors_only=args.errors_only,
         focus_query=args.focus_node,
+        comm_mode=args.comm,
+        track_topics=args.track_topics,
+        track_values=args.track_values,
+        gap_threshold=args.gap_threshold,
     )
 
     filepath = args.logfile
@@ -1333,6 +1778,13 @@ def main():
   python3 analyze_log.py launch.log -f --tail 5000      # 최근 5000줄부터
   python3 analyze_log.py launch.log -f -e               # 에러만 실시간 추적
   python3 analyze_log.py launch.log -f -n motor_driver  # 특정 노드 실시간
+
+예시 (통신 분석):
+  python3 analyze_log.py launch.log --comm --full         # 전체 통신 분석
+  python3 analyze_log.py launch.log --comm --track-topic /cmd_vel  # 특정 토픽 추적
+  python3 analyze_log.py launch.log --comm --track-value linear_x  # 값 변화 추적
+  python3 analyze_log.py launch.log --comm --gap-threshold 5       # 갭 감지 5초
+  python3 analyze_log.py launch.log -f --comm              # 실시간 통신 모니터링
         """
     )
     parser.add_argument('logfile', nargs='?', help='분석할 로그 파일 경로')
@@ -1370,6 +1822,19 @@ def main():
                         help='실시간 모드 대시보드 갱신 주기(초) [기본: 2]')
     parser.add_argument('--tail', type=int, default=5000,
                         help='실시간 모드 시작 시 읽어올 마지막 줄 수 [기본: 5000, 0=파일 끝부터]')
+    # 통신 분석 옵션
+    parser.add_argument('--comm', action='store_true',
+                        help=t('통신 데이터 내용 분석 모드', 'Communication data content analysis mode'))
+    parser.add_argument('--track-topic', action='append', default=None, dest='track_topics',
+                        help=t('상세 추적할 토픽 (반복 가능, 부분 매칭)',
+                               'Topic to track in detail (repeatable, partial match)'))
+    parser.add_argument('--track-value', action='append', default=None, dest='track_values',
+                        help=t('추적할 데이터 값 키 이름 (반복 가능)',
+                               'Data value key name to track (repeatable)'))
+    parser.add_argument('--gap-threshold', type=float, default=10.0,
+                        help=t('통신 갭 감지 임계값(초) [기본: 10.0]',
+                               'Communication gap detection threshold in seconds [default: 10.0]'))
+
     parser.add_argument('--lang', '-L', choices=['ko', 'en'], default='en',
                         help='Output language / 출력 언어 (ko: 한국어, en: English) [default: en]')
 
@@ -1832,6 +2297,10 @@ def main():
   focus-node      : tsd            (부분 매칭, 빈칸=없음)
   csv(-c)         : reports/my_report.csv  (빈칸=자동)
   --from / --to   : 2026-01-27 | 2026-01-27 09:00 | 09:00  (오늘)
+  comm(--comm)    : y / n          (통신 데이터 분석)
+  track-topic     : /cmd_vel       (부분 매칭, 빈칸=없음, 쉼표 구분)
+  track-value     : linear_x       (키 이름, 빈칸=없음, 쉼표 구분)
+  gap-threshold   : 10.0           (초 단위)
 """,
             """[examples] Input examples
   follow(-f)      : y / n
@@ -1843,6 +2312,10 @@ def main():
   focus-node      : tsd            (partial match, empty=none)
   csv(-c)         : reports/my_report.csv  (empty=auto)
   --from / --to   : 2026-01-27 | 2026-01-27 09:00 | 09:00  (today)
+  comm(--comm)    : y / n          (communication data analysis)
+  track-topic     : /cmd_vel       (partial match, empty=none, comma separated)
+  track-value     : linear_x       (key name, empty=none, comma separated)
+  gap-threshold   : 10.0           (seconds)
 """
         ))
         w = argparse.Namespace(**vars(existing_args))
@@ -1876,6 +2349,22 @@ def main():
         tt_default = w.time_to if w.time_to is not None else ''
         w.time_to = _prompt_datetime_optional(t('--to (빈칸=없음)', '--to (empty=none)'), default=tt_default)
 
+        w.comm = _prompt_bool(t('통신 분석(--comm)', 'Communication analysis (--comm)'), default=bool(w.comm))
+        if w.comm:
+            tt_str = _prompt_line(
+                t('track-topic (쉼표 구분, 빈칸=전체)', 'track-topic (comma separated, empty=all)'),
+                default=','.join(w.track_topics) if w.track_topics else '',
+            ).strip()
+            w.track_topics = [s.strip() for s in tt_str.split(',') if s.strip()] or None
+            tv_str = _prompt_line(
+                t('track-value (쉼표 구분, 빈칸=없음)', 'track-value (comma separated, empty=none)'),
+                default=','.join(w.track_values) if w.track_values else '',
+            ).strip()
+            w.track_values = [s.strip() for s in tv_str.split(',') if s.strip()] or None
+            w.gap_threshold = _prompt_float(
+                t('gap-threshold (초)', 'gap-threshold (sec)'), default=w.gap_threshold, min_value=0.1,
+            )
+
         if w.follow:
             w.window = _prompt_interval(t('window(-w) (예: 5m, 10m)', 'window(-w) (e.g. 5m, 10m)'), default=str(w.window))
             w.refresh = _prompt_float(t('refresh(-r) (초)', 'refresh(-r) (sec)'), default=w.refresh, min_value=0.1)
@@ -1902,6 +2391,17 @@ def main():
             argv += ['--to', str(a.time_to)]
         if a.full:
             argv += ['--full']
+
+        if a.comm:
+            argv += ['--comm']
+            if a.track_topics:
+                for tp in a.track_topics:
+                    argv += ['--track-topic', tp]
+            if a.track_values:
+                for tv in a.track_values:
+                    argv += ['--track-value', tv]
+            if a.gap_threshold != 10.0:
+                argv += ['--gap-threshold', str(a.gap_threshold)]
 
         if a.follow:
             argv += ['--follow']
@@ -1936,6 +2436,11 @@ def main():
         print(f"  focus-node  : {args.focus_node}")
         print(f"  csv         : {args.csv}")
         print(f"  from/to     : {args.time_from} ~ {args.time_to}")
+        if args.comm:
+            print(f"  comm        : {args.comm}")
+            print(f"  track-topic : {args.track_topics}")
+            print(f"  track-value : {args.track_values}")
+            print(f"  gap-threshold: {args.gap_threshold}")
         if args.follow:
             print(f"  window      : {args.window}")
             print(f"  refresh     : {args.refresh}")
@@ -1988,6 +2493,19 @@ def main():
         ts_from=ts_from,
         ts_to=ts_to,
     )
+
+    comm_analyzer = None
+    if args.comm:
+        comm_analyzer = CommAnalyzer(
+            interval_sec=interval_sec,
+            node_filter=args.node,
+            errors_only=args.errors_only,
+            ts_from=ts_from,
+            ts_to=ts_to,
+            track_topics=args.track_topics,
+            track_values=args.track_values,
+            gap_threshold=args.gap_threshold,
+        )
 
     file_size = os.path.getsize(args.logfile)
 
@@ -2056,6 +2574,13 @@ def main():
         print(f"  {t('노드 필터', 'Node filter')}: {args.node}")
     if args.errors_only:
         print(t("  모드: ERROR/WARN/FATAL만 분석", "  Mode: ERROR/WARN/FATAL only"))
+    if args.comm:
+        print(t("  모드: 통신 데이터 분석 활성화", "  Mode: Communication data analysis enabled"))
+        if args.track_topics:
+            print(f"  {t('추적 토픽', 'Track topics')}: {', '.join(args.track_topics)}")
+        if args.track_values:
+            print(f"  {t('추적 값', 'Track values')}: {', '.join(args.track_values)}")
+        print(f"  {t('갭 임계값', 'Gap threshold')}: {args.gap_threshold}s")
     if ts_from is not None or ts_to is not None:
         from_str = datetime.fromtimestamp(ts_from).strftime('%Y-%m-%d %H:%M:%S') if ts_from else t('(처음)', '(start)')
         to_str = datetime.fromtimestamp(ts_to).strftime('%Y-%m-%d %H:%M:%S') if ts_to else t('(끝)', '(end)')
@@ -2105,6 +2630,8 @@ def main():
 
                 line = bline.decode('utf-8', errors='replace')
                 analyzer.process_line(line)
+                if comm_analyzer is not None:
+                    comm_analyzer.process_line(line)
                 final_offset = fb.tell()
 
                 # 진행률/속도 계산은 byte 기준
@@ -2144,6 +2671,10 @@ def main():
 
     analyzer.print_report(top_nodes=args.top_nodes)
 
+    # Communication analysis report
+    if comm_analyzer is not None:
+        comm_analyzer.print_report()
+
     # 체크포인트 저장
     last_ts = analyzer.ts_max if analyzer.ts_max != float('-inf') else None
     cumulative_lines = analyzer.total_lines
@@ -2161,6 +2692,25 @@ def main():
     else:
         # 자동: reports/ 디렉토리에 날짜별 CSV 생성
         analyzer.export_csv_reports(output_dir=report_dir)
+
+    # Append comm sections to the CSV if comm mode active
+    if comm_analyzer is not None and comm_analyzer.comm_lines > 0:
+        # Determine CSV path that was just written
+        if args.csv:
+            csv_path = args.csv
+        else:
+            # Find the most recent CSV in reports/
+            report_files = sorted(
+                [f for f in os.listdir(report_dir) if f.startswith('log_report_') and f.endswith('.csv')],
+                reverse=True,
+            )
+            csv_path = os.path.join(report_dir, report_files[0]) if report_files else None
+
+        if csv_path and os.path.isfile(csv_path):
+            with open(csv_path, 'a', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                comm_analyzer.export_csv_sections(writer)
+            print(f"  {t('통신 분석 CSV 추가 완료', 'Comm analysis appended to CSV')}: {csv_path}")
 
 
 if __name__ == '__main__':
