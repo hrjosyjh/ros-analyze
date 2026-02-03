@@ -61,12 +61,34 @@ RE_COMM_ERROR = re.compile(
     r'\b(?:no\s+subscribers?|timeout|failed\s+to\s+(?:publish|subscribe|send|receive))\b',
     re.IGNORECASE,
 )
+
+# Extended communication patterns for AGV logs
+# topic: 'uagv/v2/SYSWIN/ABOT_189/alive' format
+RE_TOPIC_MSG = re.compile(r"topic:\s*'([^']+)'")
+
+# from:[x/name] to:[y/name] state transitions
+RE_STATE_TRANSITION = re.compile(r'from:\s*\[([^\]]*)\].*?to:\s*\[([^\]]*)\]')
+
+# heartbeat, timer patterns
+RE_COMM_HEARTBEAT = re.compile(r'\b(?:heartbeat|on_periodic_timer|timer)\b', re.IGNORECASE)
+
+# callback, entry, exit patterns
+RE_COMM_CALLBACK = re.compile(r'\b(?:callback|registerCallback|on_entry|on_exit|entry\(\)|exit\(\))\b')
+
+# result patterns (e.g., calculate_sdo_value() result)
+RE_COMM_RESULT = re.compile(r'\bresult\b', re.IGNORECASE)
+
 COMM_KEYWORDS = frozenset({
     'publishing', 'published', 'publish',
     'subscribing', 'subscribed', 'subscribe',
     'received', 'receiving', 'receive',
     'sending', 'sent', 'send',
     'waiting', 'timeout', 'no subscribers',
+    # Extended keywords for AGV logs
+    'topic:', 'heartbeat', 'on_periodic_timer', 'timer',
+    'callback', 'registercallback', 'on_entry', 'on_exit',
+    'result', 'on_module_mode_update', 'service', 'from:[',
+    'entry()', 'exit()',
 })
 
 
@@ -114,8 +136,15 @@ def parse_line_full(line: str) -> Optional[Tuple[float, str, str, str]]:
 def extract_comm_content(msg: str):
     """Extract communication content from a log message.
 
-    Returns dict with keys 'topics', 'action', 'kv_pairs' or None if the
-    message does not look like a communication line.
+    Returns dict with keys:
+      - 'topics': list of topic paths found
+      - 'action': one of 'error', 'state_change', 'topic_msg', 'heartbeat',
+                  'result', 'callback', 'publish', 'subscribe', 'service', or None
+      - 'kv_pairs': list of (key, float_value) tuples
+      - 'state_transition': {'from': str, 'to': str} or None
+      - 'topic_name': exact topic name from topic:'...' pattern or None
+
+    Returns None if the message does not look like a communication line.
     """
     # Cheap pre-check: must contain a topic-like path or a comm keyword
     msg_lower = msg.lower()
@@ -128,15 +157,56 @@ def extract_comm_content(msg: str):
     if not topics and not has_keyword:
         return None
 
-    # Determine action
+    # Initialize extended return values
+    state_transition = None
+    topic_name = None
+
+    # Determine action with priority-based detection
     action = None
+
+    # Priority 1: Error
     if RE_COMM_ERROR.search(msg):
         action = 'error'
-    elif RE_COMM_PUBLISH.search(msg):
+
+    # Priority 2: State transition (from:[...] to:[...])
+    if action is None:
+        st_match = RE_STATE_TRANSITION.search(msg)
+        if st_match:
+            action = 'state_change'
+            state_transition = {'from': st_match.group(1), 'to': st_match.group(2)}
+
+    # Priority 3: Topic message (topic: '...')
+    if action is None:
+        tm_match = RE_TOPIC_MSG.search(msg)
+        if tm_match:
+            action = 'topic_msg'
+            topic_name = tm_match.group(1)
+
+    # Priority 4: Heartbeat/timer
+    if action is None and RE_COMM_HEARTBEAT.search(msg):
+        action = 'heartbeat'
+
+    # Priority 5: Result
+    if action is None and RE_COMM_RESULT.search(msg):
+        action = 'result'
+
+    # Priority 6: Callback
+    if action is None and RE_COMM_CALLBACK.search(msg):
+        action = 'callback'
+
+    # Priority 7: Publish
+    if action is None and RE_COMM_PUBLISH.search(msg):
         action = 'publish'
-    elif RE_COMM_SUBSCRIBE.search(msg):
+
+    # Priority 8: Subscribe
+    if action is None and RE_COMM_SUBSCRIBE.search(msg):
         action = 'subscribe'
 
+    # Priority 9: Service
+    if action is None and 'service' in msg_lower:
+        action = 'service'
+
+    # If no topics and no action, skip
     if not topics and action is None:
         return None
 
@@ -146,6 +216,8 @@ def extract_comm_content(msg: str):
         'topics': topics,
         'action': action,
         'kv_pairs': [(k, float(v)) for k, v in kv_pairs],
+        'state_transition': state_transition,
+        'topic_name': topic_name,
     }
 
 

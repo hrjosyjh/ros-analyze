@@ -570,10 +570,16 @@ class CommAnalyzer:
 
         # node -> set of topics (bounded per node)
         self.node_topics = defaultdict(set)
-        # topic -> {count, publish, subscribe, error}
-        self.topic_stats = defaultdict(lambda: {'count': 0, 'publish': 0, 'subscribe': 0, 'error': 0})
+        # topic -> {count, publish, subscribe, error, topic_msg, heartbeat, state_change, callback, result, service}
+        self.topic_stats = defaultdict(lambda: {
+            'count': 0, 'publish': 0, 'subscribe': 0, 'error': 0,
+            'topic_msg': 0, 'heartbeat': 0, 'state_change': 0,
+            'callback': 0, 'result': 0, 'service': 0,
+        })
         # node -> topic -> action -> count
         self.node_topic_action = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+        # node -> deque of (ts, from_state, to_state) for state transitions
+        self.state_transitions = defaultdict(lambda: deque(maxlen=200))
         # bucket -> topic -> count
         self.bucket_topic_counts = defaultdict(lambda: defaultdict(int))
         # (topic, key) -> {count, sum, min, max}
@@ -632,6 +638,15 @@ class CommAnalyzer:
         topics = comm['topics']
         action = comm['action']
         kv_pairs = comm['kv_pairs']
+        state_transition = comm.get('state_transition')
+
+        # Track state transitions
+        if state_transition is not None:
+            self.state_transitions[node].append((
+                ts,
+                state_transition['from'],
+                state_transition['to'],
+            ))
 
         bk = bucket_key(ts, self.interval_sec)
 
@@ -714,24 +729,43 @@ class CommAnalyzer:
             print(f"  {'':20}  ~ {datetime.fromtimestamp(self.ts_max).strftime('%Y-%m-%d %H:%M:%S')}")
         print()
 
-        # --- Section 2: Topic Statistics ---
+        # --- Section 2: Action Type Summary ---
+        print("-" * 90)
+        print(f"  [{t('액션 타입 요약', 'Action Type Summary')}]")
+        print("-" * 90)
+        action_totals = defaultdict(int)
+        for topic, stats in self.topic_stats.items():
+            for act in ('topic_msg', 'heartbeat', 'state_change', 'callback', 'result',
+                        'publish', 'subscribe', 'service', 'error'):
+                action_totals[act] += stats.get(act, 0)
+        sorted_actions = sorted(action_totals.items(), key=lambda x: -x[1])
+        for act, cnt in sorted_actions:
+            if cnt > 0:
+                pct = cnt / self.comm_lines * 100 if self.comm_lines > 0 else 0
+                print(f"  {act:<20} {cnt:>10,}  ({pct:>5.1f}%)")
+        print()
+
+        # --- Section 3: Topic Statistics ---
         print("-" * 90)
         print(f"  [{t('토픽별 통계', 'Topic Statistics')}]")
         print("-" * 90)
         sorted_topics = sorted(self.topic_stats.items(), key=lambda x: -x[1]['count'])
         max_topic_count = sorted_topics[0][1]['count'] if sorted_topics else 1
-        header = f"  {'Topic':<40} {t('합계','Total'):>8} {'Pub':>8} {'Sub':>8} {'Err':>6}"
+        header = f"  {'Topic':<32} {t('합계','Total'):>7} {'TMsg':>6} {'HB':>5} {'State':>5} {'Rslt':>5} {'CB':>5} {'Err':>4}"
         print(header)
-        print("  " + "-" * 76)
+        print("  " + "-" * 78)
         for topic, stats in sorted_topics[:30]:
-            bar_len = int(stats['count'] / max_topic_count * 20)
+            bar_len = int(stats['count'] / max_topic_count * 15)
             bar = "█" * bar_len
-            print(f"  {topic:<40} {stats['count']:>8,} {stats['publish']:>8,} {stats['subscribe']:>8,} {stats['error']:>6,}  {bar}")
+            # Combine publish/subscribe/service into "other" if they're small
+            other = stats['publish'] + stats['subscribe'] + stats['service']
+            print(f"  {topic:<32} {stats['count']:>7,} {stats['topic_msg']:>6,} {stats['heartbeat']:>5,} "
+                  f"{stats['state_change']:>5,} {stats['result']:>5,} {stats['callback']:>5,} {stats['error']:>4,}  {bar}")
         if len(sorted_topics) > 30:
             print(f"  ... {t(f'외 {len(sorted_topics) - 30}개 토픽', f'and {len(sorted_topics) - 30} more topics')}")
         print()
 
-        # --- Section 3: Node-Topic Mapping ---
+        # --- Section 4: Node-Topic Mapping ---
         print("-" * 90)
         print(f"  [{t('노드-토픽 매핑', 'Node-Topic Mapping')}]")
         print("-" * 90)
@@ -746,7 +780,8 @@ class CommAnalyzer:
                                         key=lambda x: -sum(x[1].values()))
             for topic, acts in sorted_node_topics[:10]:
                 act_parts = []
-                for a in ('publish', 'subscribe', 'error', 'unknown'):
+                for a in ('topic_msg', 'heartbeat', 'state_change', 'result', 'callback',
+                          'publish', 'subscribe', 'service', 'error', 'unknown'):
                     cnt = acts.get(a, 0)
                     if cnt > 0:
                         act_parts.append(f"{a}:{cnt:,}")
@@ -755,7 +790,26 @@ class CommAnalyzer:
                 print(f"    ... {t(f'외 {len(sorted_node_topics) - 10}개 토픽', f'and {len(sorted_node_topics) - 10} more topics')}")
             print()
 
-        # --- Section 4: Topic Activity by Time ---
+        # --- Section 5: State Transition History ---
+        if self.state_transitions:
+            print("-" * 90)
+            print(f"  [{t('상태 전환 이력', 'State Transition History')}]")
+            print("-" * 90)
+            all_transitions = []
+            for node, transitions in self.state_transitions.items():
+                for ts, from_state, to_state in transitions:
+                    all_transitions.append((ts, node, from_state, to_state))
+            # Sort by timestamp
+            all_transitions.sort(key=lambda x: x[0])
+            # Show last 50 transitions
+            for ts, node, from_state, to_state in all_transitions[-50:]:
+                dt_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                print(f"  {dt_str}  {node:<30}  {from_state} → {to_state}")
+            if len(all_transitions) > 50:
+                print(f"  ... {t(f'외 {len(all_transitions) - 50}건', f'and {len(all_transitions) - 50} more')}")
+            print()
+
+        # --- Section 6: Topic Activity by Time ---
         if self.bucket_topic_counts:
             print("-" * 90)
             print(f"  [{t('시간대별 토픽 활동', 'Topic Activity by Time')}]")
@@ -770,7 +824,7 @@ class CommAnalyzer:
                 print(f"  {label}  {total_bk:>8,}  {top_str}")
             print()
 
-        # --- Section 5: Key-Value Data Summary ---
+        # --- Section 7: Key-Value Data Summary ---
         if self.kv_summary:
             print("-" * 90)
             print(f"  [{t('키-값 데이터 요약', 'Key-Value Data Summary')}]")
@@ -786,7 +840,7 @@ class CommAnalyzer:
                 print(f"  ... {t(f'외 {len(sorted_kv) - 40}개 항목', f'and {len(sorted_kv) - 40} more entries')}")
             print()
 
-        # --- Section 6: Value Trends ---
+        # --- Section 8: Value Trends ---
         if self.value_trends:
             print("-" * 90)
             print(f"  [{t('값 변화 추적', 'Value Change Tracking')}]")
@@ -810,7 +864,7 @@ class CommAnalyzer:
                     print(f"    {t('추세', 'Trend')}: {trend_str}")
                 print()
 
-        # --- Section 7: Communication Anomalies ---
+        # --- Section 9: Communication Anomalies ---
         if self.anomalies:
             print("-" * 90)
             print(f"  [{t('통신 이상', 'Communication Anomalies')}]  ({len(self.anomalies)} {t('건', 'events')})")
@@ -829,9 +883,15 @@ class CommAnalyzer:
         # Section: Topic Statistics
         writer.writerow([])
         writer.writerow([t('[토픽 통계]', '[Topic Statistics]')])
-        writer.writerow(['topic', 'count', 'publish', 'subscribe', 'error'])
+        writer.writerow(['topic', 'count', 'topic_msg', 'heartbeat', 'state_change',
+                         'result', 'callback', 'publish', 'subscribe', 'service', 'error'])
         for topic, stats in sorted(self.topic_stats.items(), key=lambda x: -x[1]['count']):
-            writer.writerow([topic, stats['count'], stats['publish'], stats['subscribe'], stats['error']])
+            writer.writerow([
+                topic, stats['count'],
+                stats['topic_msg'], stats['heartbeat'], stats['state_change'],
+                stats['result'], stats['callback'],
+                stats['publish'], stats['subscribe'], stats['service'], stats['error'],
+            ])
 
         # Section: Node-Topic Mapping
         writer.writerow([])
@@ -841,6 +901,20 @@ class CommAnalyzer:
             for topic in sorted(self.node_topic_action[node].keys()):
                 for action, cnt in sorted(self.node_topic_action[node][topic].items(), key=lambda x: -x[1]):
                     writer.writerow([node, topic, action, cnt])
+
+        # Section: State Transitions
+        if self.state_transitions:
+            writer.writerow([])
+            writer.writerow([t('[상태 전환 이력]', '[State Transition History]')])
+            writer.writerow(['timestamp', 'node', 'from_state', 'to_state'])
+            all_transitions = []
+            for node, transitions in self.state_transitions.items():
+                for ts, from_state, to_state in transitions:
+                    all_transitions.append((ts, node, from_state, to_state))
+            all_transitions.sort(key=lambda x: x[0])
+            for ts, node, from_state, to_state in all_transitions:
+                dt_str = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                writer.writerow([dt_str, node, from_state, to_state])
 
         # Section: KV Summary
         if self.kv_summary:
@@ -1458,11 +1532,14 @@ class LiveMonitor:
             for tp, acts in sorted_win_topics:
                 total_tp = sum(acts.values())
                 act_strs = []
-                for a in ('publish', 'subscribe', 'error', 'unknown'):
+                for a in ('topic_msg', 'heartbeat', 'state_change', 'result', 'callback',
+                          'publish', 'subscribe', 'service', 'error', 'unknown'):
                     c = acts.get(a, 0)
                     if c > 0:
                         if a == 'error':
                             act_strs.append(f"{TERM_RED}{a}:{c}{TERM_RESET}")
+                        elif a == 'state_change':
+                            act_strs.append(f"{TERM_YELLOW}{a}:{c}{TERM_RESET}")
                         else:
                             act_strs.append(f"{a}:{c}")
                 lines.append(f"  {tp:<40} {total_tp:>6,}  {', '.join(act_strs)}")
